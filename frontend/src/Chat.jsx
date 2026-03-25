@@ -1,5 +1,4 @@
-import React, { useState } from 'react';
-import './Chat.css';
+import { useState } from 'react';
 
 const Chat = () => {
   const [messages, setMessages] = useState([
@@ -22,7 +21,7 @@ const Chat = () => {
       });
       const data = await res.json();
       setMessages((msgs) => [...msgs, { sender: 'ai', text: data.reply }]);
-    } catch (err) {
+    } catch {
       setMessages((msgs) => [...msgs, { sender: 'ai', text: 'Error: Could not reach AI.' }]);
     }
     setInput('');
@@ -30,24 +29,46 @@ const Chat = () => {
   };
 
   return (
-    <div className="chat-container">
-      <div className="chat-messages">
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-2">
         {messages.map((msg, idx) => (
-          <div key={idx} className={`chat-message chat-message-${msg.sender}`}>
+          <div
+            key={idx}
+            className={`max-w-[80%] px-3 py-2 rounded-2xl text-sm break-words ${
+              msg.sender === 'user'
+                ? 'self-end bg-vscode-accent text-white'
+                : 'self-start bg-vscode-sidebar text-vscode-text'
+            }`}
+          >
             {msg.text}
           </div>
         ))}
-        {loading && <div className="chat-message chat-message-ai">Al is thinking..!</div>}
+        {loading && (
+          <div className="self-start bg-vscode-sidebar text-vscode-text-muted max-w-[80%] px-3 py-2 rounded-2xl text-sm">
+            AI is thinking...
+          </div>
+        )}
       </div>
-      <form className="chat-input-area" onSubmit={handleSend}>
+      <form
+        className="flex border-t border-vscode-border p-2 gap-2"
+        style={{ backgroundColor: 'var(--color-vscode-nav)' }}
+        onSubmit={handleSend}
+      >
         <input
           type="text"
           value={input}
           onChange={e => setInput(e.target.value)}
           placeholder="Type your message..."
           disabled={loading}
+          className="flex-1 bg-vscode-sidebar text-vscode-text placeholder-vscode-text-muted px-3 py-2 rounded-2xl border border-vscode-border outline-none text-sm min-h-[44px]"
         />
-        <button type="submit" disabled={loading || !input.trim()}>Send</button>
+        <button
+          type="submit"
+          disabled={loading || !input.trim()}
+          className="bg-vscode-accent text-white px-4 py-2 rounded-2xl text-sm font-medium min-h-[44px] min-w-[44px] cursor-pointer border-none disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Send
+        </button>
       </form>
     </div>
   );
