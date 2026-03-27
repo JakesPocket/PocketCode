@@ -36,19 +36,23 @@ function App() {
 
   return (
     <Layout activeTab={activeTab} onTabChange={setActiveTab}>
-      {activeTab === 'extensions' && (
+      <div className={activeTab === 'extensions' ? 'h-full' : 'hidden h-full'}>
         <ExtensionsView onOpenFile={handleOpenFile} />
-      )}
-      {activeTab === 'editor' && (
+      </div>
+      <div className={activeTab === 'editor' ? 'h-full' : 'hidden h-full'}>
         <EditorView
           openFiles={openFiles}
           activeFilePath={activeFilePath}
           onSelectFile={setActiveFilePath}
           onCloseFile={handleCloseFile}
         />
-      )}
-      {activeTab === 'terminal' && <TerminalView />}
-      {activeTab === 'ai-chat' && <Chat />}
+      </div>
+      <div className={activeTab === 'terminal' ? 'h-full' : 'hidden h-full'}>
+        <TerminalView />
+      </div>
+      <div className={activeTab === 'ai-chat' ? 'h-full' : 'hidden h-full'}>
+        <Chat />
+      </div>
     </Layout>
   );
 }

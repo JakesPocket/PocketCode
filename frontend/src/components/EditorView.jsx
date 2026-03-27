@@ -1,4 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { EditorState } from '@codemirror/state';
+import {
+  EditorView as CodeMirrorView,
+  drawSelection,
+  crosshairCursor,
+  lineNumbers,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+} from '@codemirror/view';
+import { javascript } from '@codemirror/lang-javascript';
+import { python } from '@codemirror/lang-python';
+import { html } from '@codemirror/lang-html';
+import { oneDark } from '@codemirror/theme-one-dark';
 import { apiUrl } from '../config/server';
 
 function IconClose() {
@@ -28,9 +41,131 @@ function EmptyState() {
 }
 
 export default function EditorView({ openFiles, activeFilePath, onSelectFile, onCloseFile }) {
-  const [fileContents, setFileContents] = useState({}); // path → string content
+  const [fileContents, setFileContents] = useState({}); // path → local editor content
+  const [serverContents, setServerContents] = useState({}); // path → last fetched server content
   const [loadingPath, setLoadingPath] = useState(null);
   const [errorPath, setErrorPath] = useState(null);
+
+  const editorHostRef = useRef(null);
+  const editorViewRef = useRef(null);
+  const sessionsRef = useRef(new Map()); // path -> { state, scrollTop, scrollLeft }
+  const activePathRef = useRef(activeFilePath);
+  const fileContentsRef = useRef(fileContents);
+  const serverContentsRef = useRef(serverContents);
+  const pollingBusyRef = useRef(false);
+
+  useEffect(() => {
+    fileContentsRef.current = fileContents;
+  }, [fileContents]);
+
+  useEffect(() => {
+    serverContentsRef.current = serverContents;
+  }, [serverContents]);
+
+  const languageExtensionForPath = useMemo(() => {
+    return (filePath) => {
+      const lower = filePath.toLowerCase();
+      if (lower.endsWith('.py')) return python();
+      if (lower.endsWith('.html') || lower.endsWith('.htm')) return html();
+      if (
+        lower.endsWith('.js') ||
+        lower.endsWith('.jsx') ||
+        lower.endsWith('.mjs') ||
+        lower.endsWith('.cjs') ||
+        lower.endsWith('.ts') ||
+        lower.endsWith('.tsx')
+      ) {
+        return javascript({ typescript: lower.endsWith('.ts') || lower.endsWith('.tsx') });
+      }
+      return javascript({ jsx: true });
+    };
+  }, []);
+
+  function createEditorState(filePath, doc) {
+    return EditorState.create({
+      doc,
+      extensions: [
+        lineNumbers(),
+        highlightActiveLine(),
+        highlightActiveLineGutter(),
+        drawSelection(),
+        crosshairCursor(),
+        oneDark,
+        languageExtensionForPath(filePath),
+        CodeMirrorView.lineWrapping,
+        CodeMirrorView.updateListener.of((update) => {
+          const currentPath = activePathRef.current;
+          if (!currentPath) return;
+
+          // Persist full CodeMirror view state (selection + history + scroll) per file tab.
+          sessionsRef.current.set(currentPath, {
+            state: update.state,
+            scrollTop: update.view.scrollDOM.scrollTop,
+            scrollLeft: update.view.scrollDOM.scrollLeft,
+          });
+
+          if (!update.docChanged) return;
+
+          const next = update.state.doc.toString();
+          setFileContents((prev) => {
+            if (prev[currentPath] === next) return prev;
+            return { ...prev, [currentPath]: next };
+          });
+        }),
+      ],
+    });
+  }
+
+  function saveSessionForPath(path) {
+    const view = editorViewRef.current;
+    if (!view || !path) return;
+    sessionsRef.current.set(path, {
+      state: view.state,
+      scrollTop: view.scrollDOM.scrollTop,
+      scrollLeft: view.scrollDOM.scrollLeft,
+    });
+  }
+
+  function restoreSessionForPath(path) {
+    const view = editorViewRef.current;
+    if (!view || !path) return;
+
+    const existing = sessionsRef.current.get(path);
+    const targetState = existing?.state ?? createEditorState(path, fileContentsRef.current[path] ?? '');
+
+    if (!existing) {
+      sessionsRef.current.set(path, { state: targetState, scrollTop: 0, scrollLeft: 0 });
+    }
+
+    if (view.state !== targetState) {
+      view.setState(targetState);
+    }
+
+    const targetScrollTop = existing?.scrollTop ?? 0;
+    const targetScrollLeft = existing?.scrollLeft ?? 0;
+
+    requestAnimationFrame(() => {
+      if (!editorViewRef.current) return;
+      editorViewRef.current.scrollDOM.scrollTop = targetScrollTop;
+      editorViewRef.current.scrollDOM.scrollLeft = targetScrollLeft;
+    });
+  }
+
+  // Create the CodeMirror view once.
+  useEffect(() => {
+    if (!editorHostRef.current || editorViewRef.current) return;
+
+    editorViewRef.current = new CodeMirrorView({
+      state: createEditorState(activeFilePath || '/untitled.js', ''),
+      parent: editorHostRef.current,
+    });
+
+    return () => {
+      saveSessionForPath(activePathRef.current);
+      editorViewRef.current?.destroy();
+      editorViewRef.current = null;
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch file content whenever a new activeFilePath appears that we haven't loaded yet
   useEffect(() => {
@@ -47,6 +182,7 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
       })
       .then((text) => {
         setFileContents((prev) => ({ ...prev, [activeFilePath]: text }));
+        setServerContents((prev) => ({ ...prev, [activeFilePath]: text }));
       })
       .catch((e) => {
         setFileContents((prev) => ({ ...prev, [activeFilePath]: null }));
@@ -55,6 +191,129 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
       })
       .finally(() => setLoadingPath(null));
   }, [activeFilePath]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep local maps/sessions clean when tabs are closed.
+  useEffect(() => {
+    const openPathSet = new Set(openFiles.map((f) => f.path));
+
+    setFileContents((prev) => {
+      const next = {};
+      for (const [path, text] of Object.entries(prev)) {
+        if (openPathSet.has(path)) next[path] = text;
+      }
+      return next;
+    });
+
+    setServerContents((prev) => {
+      const next = {};
+      for (const [path, text] of Object.entries(prev)) {
+        if (openPathSet.has(path)) next[path] = text;
+      }
+      return next;
+    });
+
+    for (const path of [...sessionsRef.current.keys()]) {
+      if (!openPathSet.has(path)) sessionsRef.current.delete(path);
+    }
+  }, [openFiles]);
+
+  // Switch CodeMirror session whenever active file tab changes.
+  useEffect(() => {
+    if (!editorViewRef.current) return;
+
+    const previousPath = activePathRef.current;
+    const activeContent = activeFilePath ? fileContents[activeFilePath] : undefined;
+
+    if (previousPath && previousPath !== activeFilePath) {
+      saveSessionForPath(previousPath);
+    }
+
+    activePathRef.current = activeFilePath;
+
+    if (!activeFilePath) return;
+    if (activeContent === undefined || activeContent === null) return;
+
+    const isTabSwitch = previousPath !== activeFilePath;
+    const hasSession = sessionsRef.current.has(activeFilePath);
+
+    if (isTabSwitch || !hasSession) {
+      restoreSessionForPath(activeFilePath);
+    }
+  }, [activeFilePath, fileContents]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // If content changes externally (e.g. AI refactor on disk), patch active editor doc live.
+  useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view || !activeFilePath) return;
+
+    const incoming = fileContents[activeFilePath];
+    if (incoming === undefined || incoming === null) return;
+
+    const currentDoc = view.state.doc.toString();
+    if (incoming === currentDoc) return;
+
+    const scrollTop = view.scrollDOM.scrollTop;
+    const scrollLeft = view.scrollDOM.scrollLeft;
+    const maxPos = incoming.length;
+    const selection = view.state.selection.main;
+    const anchor = Math.min(selection.anchor, maxPos);
+    const head = Math.min(selection.head, maxPos);
+
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: incoming },
+      selection: { anchor, head },
+    });
+
+    sessionsRef.current.set(activeFilePath, {
+      state: view.state,
+      scrollTop,
+      scrollLeft,
+    });
+
+    requestAnimationFrame(() => {
+      if (!editorViewRef.current) return;
+      editorViewRef.current.scrollDOM.scrollTop = scrollTop;
+      editorViewRef.current.scrollDOM.scrollLeft = scrollLeft;
+    });
+  }, [activeFilePath, fileContents]);
+
+  // Poll open files to reflect external edits made by the AI agent.
+  useEffect(() => {
+    if (openFiles.length === 0) return;
+
+    const interval = setInterval(async () => {
+      if (pollingBusyRef.current) return;
+      pollingBusyRef.current = true;
+
+      try {
+        for (const file of openFiles) {
+          const path = file.path;
+
+          const response = await fetch(apiUrl(`/api/file?path=${encodeURIComponent(path)}`));
+          if (!response.ok) continue;
+
+          const text = await response.text();
+          const previousServer = serverContentsRef.current[path];
+
+          if (previousServer === undefined) {
+            setServerContents((prev) => ({ ...prev, [path]: text }));
+            continue;
+          }
+
+          if (text !== previousServer) {
+            setServerContents((prev) => ({ ...prev, [path]: text }));
+            setFileContents((prev) => ({ ...prev, [path]: text }));
+          }
+        }
+      } catch (err) {
+        console.warn('EditorView polling warning:', err);
+      } finally {
+        pollingBusyRef.current = false;
+      }
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [openFiles]);
 
   const activeFile = openFiles.find((f) => f.path === activeFilePath);
   const content = activeFilePath ? fileContents[activeFilePath] : undefined;
@@ -130,12 +389,9 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
         )}
 
         {openFiles.length > 0 && !isLoading && !hasError && content !== undefined && (
-          <pre
-            className="p-4 text-sm font-mono leading-relaxed text-vscode-text whitespace-pre-wrap break-words"
-            style={{ tabSize: 2 }}
-          >
-            {content ?? '(empty file)'}
-          </pre>
+          <div className="h-full min-h-0">
+            <div ref={editorHostRef} className="editor-cm-shell h-full" />
+          </div>
         )}
       </div>
     </div>
