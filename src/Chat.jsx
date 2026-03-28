@@ -6,6 +6,13 @@ const CHAT_MESSAGES_KEY = 'pocketide.chat.messages.v1';
 const CHAT_INPUT_KEY = 'pocketide.chat.input.v1';
 const CHAT_PENDING_REVIEW_KEY = 'pocketide.chat.pendingReviewPaths.v1';
 
+function createMessageId() {
+  if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function readInitialPendingReviewPaths() {
   const stored = readJson(CHAT_PENDING_REVIEW_KEY, []);
   if (!Array.isArray(stored)) return [];
@@ -92,7 +99,6 @@ function UserBubble({ text }) {
     <div className="flex justify-end">
       <div className="max-w-[88%] px-3 py-2 rounded-xl text-sm
                       bg-vscode-accent/20 text-vscode-text break-words leading-relaxed border border-vscode-accent/40">
-        <div className="text-[10px] uppercase tracking-wider text-vscode-text-muted mb-1">You</div>
         <div className="whitespace-pre-wrap">{text}</div>
       </div>
     </div>
@@ -474,7 +480,7 @@ export default function Chat() {
     setMessages((prev) => [...prev, { role: 'user', text: prompt }]);
 
     // Reserve a slot for the streaming agent reply, identified by a stable id
-    const agentId = crypto.randomUUID();
+    const agentId = createMessageId();
     setMessages((prev) => [...prev, { id: agentId, role: 'agent', text: '', streaming: true }]);
 
     const ctrl = new AbortController();
