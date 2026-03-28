@@ -90,23 +90,144 @@ function formatToolPayload(value) {
 function UserBubble({ text }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-tr-sm text-sm
-                      bg-vscode-accent text-white break-words leading-relaxed">
-        {text}
+      <div className="max-w-[88%] px-3 py-2 rounded-xl text-sm
+                      bg-vscode-accent/20 text-vscode-text break-words leading-relaxed border border-vscode-accent/40">
+        <div className="text-[10px] uppercase tracking-wider text-vscode-text-muted mb-1">You</div>
+        <div className="whitespace-pre-wrap">{text}</div>
       </div>
     </div>
   );
 }
 
+function splitCodeBlocks(text) {
+  const chunks = [];
+  const re = /```([a-zA-Z0-9_-]+)?\n([\s\S]*?)```/g;
+  let last = 0;
+  let m;
+
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) {
+      chunks.push({ type: 'text', value: text.slice(last, m.index) });
+    }
+    chunks.push({ type: 'code', lang: m[1] || '', value: (m[2] || '').replace(/\n$/, '') });
+    last = re.lastIndex;
+  }
+
+  if (last < text.length) {
+    chunks.push({ type: 'text', value: text.slice(last) });
+  }
+
+  return chunks;
+}
+
+function InlineText({ line }) {
+  const parts = line.split(/(`[^`]+`)/g);
+  return parts.map((part, idx) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return (
+        <code key={idx} className="px-1 py-0.5 rounded bg-vscode-sidebar border border-vscode-border font-mono text-[12px] text-vscode-text">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return <span key={idx}>{part}</span>;
+  });
+}
+
+function TextBlock({ text }) {
+  const lines = text.split('\n');
+  return (
+    <div className="text-sm text-vscode-text leading-7 whitespace-pre-wrap break-words">
+      {lines.map((line, idx) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div key={idx} className="h-2" />;
+
+        const isBullet = /^[-*]\s+/.test(trimmed);
+        const isNumbered = /^\d+\.\s+/.test(trimmed);
+
+        if (isBullet || isNumbered) {
+          return (
+            <div key={idx} className="flex items-start gap-2">
+              <span className="text-vscode-text-muted">{isNumbered ? trimmed.match(/^\d+\./)?.[0] : '•'}</span>
+              <span><InlineText line={trimmed.replace(/^([-*]|\d+\.)\s+/, '')} /></span>
+            </div>
+          );
+        }
+
+        if (/^#{1,3}\s+/.test(trimmed)) {
+          return (
+            <div key={idx} className="text-vscode-text font-semibold mt-1">
+              <InlineText line={trimmed.replace(/^#{1,3}\s+/, '')} />
+            </div>
+          );
+        }
+
+        return (
+          <div key={idx}>
+            <InlineText line={line} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CodeBlock({ code, lang }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-vscode-border bg-vscode-sidebar overflow-hidden my-2">
+      <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-vscode-text-muted border-b border-vscode-border flex items-center justify-between">
+        <span>{lang || 'code'}</span>
+        <button
+          type="button"
+          onClick={copyCode}
+          className="text-vscode-text-muted hover:text-vscode-text"
+          style={{ background: 'none', border: 'none', outline: 'none' }}
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <pre className="p-3 text-[12px] leading-relaxed text-vscode-text overflow-x-auto font-mono">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
 function AgentBubble({ text, streaming }) {
+  const chunks = splitCodeBlocks(text || '');
+
   return (
     <div className="flex justify-start">
-      <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-tl-sm text-sm
-                      bg-vscode-sidebar text-vscode-text break-words leading-relaxed whitespace-pre-wrap">
-        {text}
+      <div className="max-w-[92%] min-w-0">
+        <div className="flex items-center gap-2 mb-1">
+          <div className="w-5 h-5 rounded-md bg-vscode-accent/20 text-vscode-accent flex items-center justify-center text-[11px] font-semibold border border-vscode-accent/40">
+            C
+          </div>
+          <span className="text-[11px] uppercase tracking-wider text-vscode-text-muted">Copilot</span>
+        </div>
+        <div className="pl-7">
+          {chunks.length === 0 ? <TextBlock text="" /> : chunks.map((chunk, idx) => (
+            chunk.type === 'code'
+              ? <CodeBlock key={idx} code={chunk.value} lang={chunk.lang} />
+              : <TextBlock key={idx} text={chunk.value} />
+          ))}
+        </div>
         {streaming && (
-          <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-vscode-accent align-middle
-                           rounded-sm animate-pulse" />
+          <div className="pl-7 mt-1">
+            <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-vscode-accent align-middle rounded-sm animate-pulse" />
+          </div>
         )}
       </div>
     </div>

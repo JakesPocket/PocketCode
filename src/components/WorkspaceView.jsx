@@ -198,6 +198,19 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
       .catch(() => setBranches([]));
   }, [repo.id]);
 
+  async function postRepoAction(endpoint, body = {}) {
+    const r = await fetch(apiUrl(endpoint), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, repo: repo.id }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(data.error || `Failed (${r.status})`);
+    }
+    return data;
+  }
+
   useEffect(() => {
     if (!isExpanded) return;
     fetchStatus();
@@ -208,16 +221,7 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
     setBusy(true);
     setActionMsg('');
     try {
-      const r = await fetch(apiUrl(endpoint), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...body, repo: repo.id }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setActionMsg(data.error || `Failed (${r.status})`);
-        return false;
-      }
+      const data = await postRepoAction(endpoint, body);
       if (data.output) setActionMsg(data.output);
       fetchStatus();
       fetchBranches();
@@ -225,6 +229,38 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
     } catch (e) {
       setActionMsg(e.message);
       return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSyncChanges(aheadCount, behindCount) {
+    if (busy) return;
+    if (aheadCount === 0 && behindCount === 0) {
+      setActionMsg('Already up to date with remote.');
+      return;
+    }
+
+    setBusy(true);
+    setActionMsg('');
+    try {
+      const outputs = [];
+
+      if (behindCount > 0) {
+        const pull = await postRepoAction('/api/git/pull');
+        if (pull.output) outputs.push(pull.output);
+      }
+
+      if (aheadCount > 0) {
+        const push = await postRepoAction('/api/git/push');
+        if (push.output) outputs.push(push.output);
+      }
+
+      setActionMsg(outputs.join('\n').trim() || 'Sync complete.');
+      fetchStatus();
+      fetchBranches();
+    } catch (e) {
+      setActionMsg(e.message);
     } finally {
       setBusy(false);
     }
@@ -405,6 +441,11 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
         const hasChanges = staged.length + unstaged.length + untracked.length > 0;
         const canCommit = staged.length > 0 && commitMsg.trim().length > 0;
         const hasMessage = commitMsg.trim().length > 0;
+        const syncLabel = [
+          behind > 0 ? `${behind}↓` : '',
+          ahead > 0 ? `${ahead}↑` : '',
+        ].filter(Boolean).join(' ');
+        const canSync = (ahead > 0 || behind > 0) && !busy;
         return (
           <div>
             {showBranchPicker && (
@@ -582,16 +623,19 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
                 </div>
               )}
 
-              <div className="flex gap-2 px-3 pt-2 pb-3">
-                <button onClick={() => gitAction('/api/git/pull')} disabled={busy}
-                  className="flex-1 py-2 rounded text-sm border border-vscode-border text-vscode-text hover:bg-vscode-sidebar-hover disabled:opacity-40"
-                  style={{ background: 'transparent', outline: 'none' }}>
-                  Pull
-                </button>
-                <button onClick={() => gitAction('/api/git/push')} disabled={busy}
-                  className="flex-1 py-2 rounded text-sm border border-vscode-border text-vscode-text hover:bg-vscode-sidebar-hover disabled:opacity-40"
-                  style={{ background: 'transparent', outline: 'none' }}>
-                  Push
+              <div className="px-3 pt-2 pb-3">
+                <button
+                  onClick={() => handleSyncChanges(ahead, behind)}
+                  disabled={!canSync}
+                  className={[
+                    'w-full py-2 rounded text-sm font-medium transition-colors',
+                    canSync
+                      ? 'bg-vscode-accent text-white cursor-pointer'
+                      : 'bg-vscode-sidebar border border-vscode-border text-vscode-text-muted opacity-50 cursor-not-allowed',
+                  ].join(' ')}
+                  style={{ border: 'none', outline: 'none' }}
+                >
+                  {busy ? 'Syncing…' : `Sync Changes${syncLabel ? ` ${syncLabel}` : ''}`}
                 </button>
               </div>
 
