@@ -219,9 +219,8 @@ function AgentBubble({ text, streaming }) {
       <div className="max-w-[92%] min-w-0">
         <div className="flex items-center gap-2 mb-1">
           <div className="w-5 h-5 rounded-md bg-vscode-accent/20 text-vscode-accent flex items-center justify-center text-[11px] font-semibold border border-vscode-accent/40">
-            C
+            A
           </div>
-          <span className="text-[11px] uppercase tracking-wider text-vscode-text-muted">Copilot</span>
         </div>
         <div className="pl-7">
           {chunks.length === 0 ? <TextBlock text="" /> : chunks.map((chunk, idx) => (
