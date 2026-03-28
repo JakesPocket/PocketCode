@@ -126,10 +126,13 @@ function GitFileBadge({ status }) {
 function GitSection({ title, files, action, actionLabel, busy }) {
   if (!files.length) return null;
   return (
-    <div className="mb-1">
-      <div className="flex items-center justify-between px-3 pt-3 pb-1">
-        <span className="text-[11px] font-semibold uppercase tracking-widest text-vscode-text-muted">
-          {title} <span className="font-normal normal-case tracking-normal opacity-70">({files.length})</span>
+    <div className="mb-1 border-t border-vscode-border/60">
+      <div className="flex items-center justify-between px-3 pt-2.5 pb-1.5">
+        <span className="text-[11px] font-semibold text-vscode-text-muted flex items-center gap-2">
+          <span>{title}</span>
+          <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-sky-500/80 text-white text-[10px]">
+            {files.length}
+          </span>
         </span>
         {action && (
           <button
@@ -330,23 +333,94 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
 
   return (
     <div className="border-b border-vscode-border">
-      <button
-        onClick={onToggle}
-        className="w-full px-3 py-2.5 flex items-center justify-between text-left hover:bg-vscode-sidebar-hover"
-        style={{ background: 'transparent', border: 'none', outline: 'none' }}
+      <div
+        className={`w-full px-3 py-2.5 flex items-center justify-between hover:bg-vscode-sidebar-hover ${isExpanded ? 'bg-vscode-sidebar-hover/30 border-t border-vscode-accent/50' : ''}`}
       >
-        <div className="min-w-0">
-          <div className="text-sm text-vscode-text truncate">{repo.name}</div>
-          <div className="text-[11px] text-vscode-text-muted">
-            {branchLabel}{ahead > 0 ? `  ↑${ahead}` : ''}{behind > 0 ? `  ↓${behind}` : ''}{changedCount > 0 ? `  • ${changedCount} changes` : ''}
-          </div>
+        <div className="min-w-0 flex items-center gap-2">
+          <button
+            onClick={onToggle}
+            className="text-vscode-text-muted hover:text-vscode-text"
+            style={{ background: 'none', border: 'none', outline: 'none' }}
+            title={isExpanded ? 'Collapse repo' : 'Expand repo'}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round"
+              className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`}>
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+            strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 text-vscode-text-muted shrink-0">
+            <rect x="3" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="14" width="7" height="7" rx="1" />
+            <path d="M10 7h4M17 10v4" />
+          </svg>
+          <span className="text-sm text-vscode-text truncate shrink-0">{repo.name}</span>
+          <span className="text-vscode-text-muted opacity-40 shrink-0">/</span>
+          <button
+            onClick={() => {
+              fetchBranches();
+              if (!isExpanded) {
+                onToggle();
+                setShowBranchPicker(true);
+                return;
+              }
+              setShowBranchPicker((v) => !v);
+            }}
+            disabled={busy}
+            className="text-sm text-vscode-text hover:text-white disabled:opacity-40 truncate"
+            style={{ background: 'none', border: 'none', outline: 'none' }}
+            title="Switch branch"
+          >
+            {branchLabel} {showBranchPicker ? '▲' : '▼'}
+          </button>
+          {(ahead > 0 || behind > 0 || changedCount > 0) && (
+            <span className="text-[11px] text-vscode-text-muted shrink-0">
+              {ahead > 0 ? `↑${ahead}` : ''}{ahead > 0 && behind > 0 ? ' ' : ''}{behind > 0 ? `↓${behind}` : ''}{changedCount > 0 ? ` • ${changedCount}` : ''}
+            </span>
+          )}
         </div>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-          strokeLinecap="round" strokeLinejoin="round"
-          className={`w-4 h-4 text-vscode-text-muted transition-transform ${isExpanded ? 'rotate-180' : ''}`}>
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-      </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => gitAction('/api/git/pull')}
+            disabled={busy || !isExpanded}
+            className="text-vscode-text-muted hover:text-vscode-text disabled:opacity-40"
+            style={{ background: 'none', border: 'none', outline: 'none' }}
+            title="Pull"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
+            </svg>
+          </button>
+          <button
+            onClick={() => gitAction('/api/git/push')}
+            disabled={busy || !isExpanded}
+            className="text-vscode-text-muted hover:text-vscode-text disabled:opacity-40"
+            style={{ background: 'none', border: 'none', outline: 'none' }}
+            title="Push"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <line x1="12" y1="3" x2="12" y2="15" />
+              <polyline points="7 8 12 3 17 8" />
+              <rect x="5" y="15" width="14" height="6" rx="1" />
+            </svg>
+          </button>
+          <button
+            onClick={fetchStatus}
+            disabled={busy || !isExpanded}
+            className="text-vscode-text-muted hover:text-vscode-text disabled:opacity-40"
+            style={{ background: 'none', border: 'none', outline: 'none' }}
+            title="Refresh"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
+            </svg>
+          </button>
+        </div>
+      </div>
 
       {!isExpanded && null}
       {isExpanded && loading && (
@@ -364,28 +438,6 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
         const hasMessage = commitMsg.trim().length > 0;
         return (
           <div>
-            <div className="flex items-center justify-between px-3 py-2 border-t border-vscode-border">
-              <button
-                onClick={() => {
-                  fetchBranches();
-                  setShowBranchPicker((v) => !v);
-                }}
-                disabled={busy}
-                className="text-sm text-vscode-text hover:text-white disabled:opacity-40"
-                style={{ background: 'none', border: 'none', outline: 'none' }}
-              >
-                {branch} {showBranchPicker ? '▲' : '▼'}
-              </button>
-              <button
-                onClick={fetchStatus}
-                disabled={busy}
-                className="text-vscode-text-muted hover:text-vscode-text"
-                style={{ background: 'none', border: 'none', outline: 'none' }}
-              >
-                Refresh
-              </button>
-            </div>
-
             {showBranchPicker && (
               <div className="px-3 py-2 border-t border-vscode-border bg-vscode-sidebar">
                 <div className="flex flex-col gap-1 mb-2">
@@ -528,51 +580,43 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
             )}
 
             <div className="flex-1 overflow-y-auto">
+              <div className="px-3 py-2 border-t border-vscode-border/70 bg-vscode-sidebar/30">
+                <div className="flex items-center gap-2 mb-2">
+                  <input
+                    value={commitMsg}
+                    onChange={(e) => setCommitMsg(e.target.value)}
+                    placeholder={`Message (Commit on \"${branch}\")`}
+                    className="flex-1 rounded text-sm px-2 py-1.5 bg-vscode-bg border border-vscode-border text-vscode-text placeholder-vscode-text-muted focus:outline-none focus:border-vscode-accent"
+                  />
+                  <button
+                    onClick={handleGenerateCommitMessage}
+                    disabled={busy}
+                    className="text-vscode-text-muted hover:text-vscode-text disabled:opacity-40"
+                    style={{ background: 'none', border: 'none', outline: 'none' }}
+                    title="Generate commit message"
+                  >
+                    ✨
+                  </button>
+                </div>
+                <button
+                  onClick={() => { if (commitMsg.trim()) gitAction('/api/git/commit', { message: commitMsg }).then((ok) => { if (ok) setCommitMsg(''); }); }}
+                  disabled={!canCommit || busy}
+                  className={[
+                    'w-full py-2 rounded text-sm font-medium transition-colors',
+                    canCommit && !busy
+                      ? 'bg-vscode-accent/80 text-white cursor-pointer'
+                      : 'bg-vscode-sidebar border border-vscode-border text-vscode-text-muted opacity-50 cursor-not-allowed',
+                  ].join(' ')}
+                  style={{ border: 'none', outline: 'none' }}
+                >
+                  {busy ? 'Working…' : 'Commit'}
+                </button>
+              </div>
+
               {!hasChanges && <p className="px-3 py-4 text-sm text-vscode-text-muted">No changes.</p>}
               <GitSection title="Staged" files={staged} action={staged.length ? () => gitAction('/api/git/unstage', { all: true }) : null} actionLabel="Unstage all" busy={busy} />
               <GitSection title="Changes" files={unstaged} action={unstaged.length ? () => gitAction('/api/git/stage', { all: true }) : null} actionLabel="Stage all" busy={busy} />
               <GitSection title="Untracked" files={untracked} action={untracked.length ? () => gitAction('/api/git/stage', { all: true }) : null} actionLabel="Stage all" busy={busy} />
-
-              {staged.length > 0 && (
-                <div className="px-3 pt-3 pb-2 border-t border-vscode-border mt-1">
-                  <div className="mb-2.5 p-2 rounded border border-vscode-border bg-vscode-sidebar">
-                    <div className="text-[11px] uppercase tracking-wider text-vscode-text-muted mb-1.5">Commit flow</div>
-                    <div className="grid grid-cols-3 gap-2 text-[11px]">
-                      <div className="rounded border px-2 py-1 border-vscode-border text-vscode-text"><div className="font-medium">1. Stage</div><div className="text-vscode-text-muted">{staged.length} staged</div></div>
-                      <div className={['rounded border px-2 py-1', hasMessage ? 'border-green-500/40 text-vscode-text' : 'border-vscode-border text-vscode-text-muted'].join(' ')}><div className="font-medium">2. Message</div><div>{hasMessage ? 'ready' : 'required'}</div></div>
-                      <div className={['rounded border px-2 py-1', canCommit ? 'border-green-500/40 text-vscode-text' : 'border-vscode-border text-vscode-text-muted'].join(' ')}><div className="font-medium">3. Commit</div><div>{canCommit ? 'ready' : 'blocked'}</div></div>
-                    </div>
-                  </div>
-                  <div className="flex justify-end mb-1">
-                    <button onClick={handleGenerateCommitMessage} disabled={staged.length === 0 || busy}
-                      className="text-[11px] px-2.5 py-1 rounded border border-vscode-border text-vscode-text-muted hover:text-vscode-text disabled:opacity-40"
-                      style={{ background: 'transparent', outline: 'none' }}>
-                      Generate commit message
-                    </button>
-                  </div>
-                  <textarea value={commitMsg} onChange={(e) => setCommitMsg(e.target.value)} placeholder="Commit message…" rows={3}
-                    className="w-full rounded text-sm px-2 py-1.5 resize-none bg-vscode-bg border border-vscode-border text-vscode-text placeholder-vscode-text-muted focus:outline-none focus:border-vscode-accent" />
-                  <button onClick={() => { if (commitMsg.trim()) gitAction('/api/git/commit', { message: commitMsg }).then((ok) => { if (ok) setCommitMsg(''); }); }}
-                    disabled={!canCommit || busy}
-                    className={['mt-2 w-full py-2 rounded text-sm font-medium transition-colors', canCommit && !busy ? 'bg-vscode-accent text-white cursor-pointer' : 'bg-vscode-sidebar border border-vscode-border text-vscode-text-muted opacity-50 cursor-not-allowed'].join(' ')}
-                    style={{ border: 'none', outline: 'none' }}>
-                    {busy ? 'Working…' : 'Commit'}
-                  </button>
-                </div>
-              )}
-
-              <div className="flex gap-2 px-3 pt-2 pb-3">
-                <button onClick={() => gitAction('/api/git/pull')} disabled={busy}
-                  className="flex-1 py-2 rounded text-sm border border-vscode-border text-vscode-text hover:bg-vscode-sidebar-hover disabled:opacity-40"
-                  style={{ background: 'transparent', outline: 'none' }}>
-                  Pull
-                </button>
-                <button onClick={() => gitAction('/api/git/push')} disabled={busy}
-                  className="flex-1 py-2 rounded text-sm border border-vscode-border text-vscode-text hover:bg-vscode-sidebar-hover disabled:opacity-40"
-                  style={{ background: 'transparent', outline: 'none' }}>
-                  Push
-                </button>
-              </div>
 
               {actionMsg && <p className="px-3 pb-3 text-[11px] text-vscode-text-muted whitespace-pre-wrap break-words">{actionMsg}</p>}
             </div>
