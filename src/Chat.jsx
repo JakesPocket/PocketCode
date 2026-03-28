@@ -129,8 +129,12 @@ export default function Chat() {
   const [changesSummary, setChangesSummary] = useState({ totals: { files: 0, added: 0, removed: 0 }, files: [] });
   const [changesOpen, setChangesOpen] = useState(false);
   const [changesLoading, setChangesLoading] = useState(false);
+  const [pendingReviewPaths, setPendingReviewPaths] = useState([]);
+  const [reviewActionMsg, setReviewActionMsg] = useState('');
+  const [undoBusy, setUndoBusy] = useState(false);
   const bottomRef = useRef(null);
   const abortRef = useRef(null);
+  const preRequestSnapshotRef = useRef(new Map());
 
   const fetchChangesSummary = useCallback(async () => {
     setChangesLoading(true);
@@ -138,16 +142,56 @@ export default function Chat() {
       const r = await fetch(apiUrl('/api/git/changes-summary'));
       if (!r.ok) throw new Error(`Failed (${r.status})`);
       const data = await r.json();
-      setChangesSummary({
+      const normalized = {
         totals: data?.totals || { files: 0, added: 0, removed: 0 },
         files: Array.isArray(data?.files) ? data.files : [],
-      });
+      };
+      setChangesSummary(normalized);
+      return normalized;
     } catch (_) {
-      setChangesSummary({ totals: { files: 0, added: 0, removed: 0 }, files: [] });
+      const empty = { totals: { files: 0, added: 0, removed: 0 }, files: [] };
+      setChangesSummary(empty);
+      return empty;
     } finally {
       setChangesLoading(false);
     }
   }, []);
+
+  function signatureByPath(summary) {
+    const map = new Map();
+    for (const f of summary.files || []) {
+      map.set(f.path, [f.status, f.added || 0, f.removed || 0, f.staged ? 1 : 0, f.unstaged ? 1 : 0, f.untracked ? 1 : 0].join('|'));
+    }
+    return map;
+  }
+
+  async function handleUndoAgentChanges() {
+    if (!pendingReviewPaths.length || undoBusy) return;
+    setUndoBusy(true);
+    setReviewActionMsg('');
+    try {
+      const r = await fetch(apiUrl('/api/git/discard-changes'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: pendingReviewPaths }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `Failed (${r.status})`);
+      setPendingReviewPaths([]);
+      setReviewActionMsg(`Undid ${data.reverted || 0} file change(s).`);
+      await fetchChangesSummary();
+    } catch (e) {
+      setReviewActionMsg(e.message);
+    } finally {
+      setUndoBusy(false);
+    }
+  }
+
+  function handleKeepAgentChanges() {
+    if (!pendingReviewPaths.length) return;
+    setPendingReviewPaths([]);
+    setReviewActionMsg('Kept latest agent changes.');
+  }
 
   useEffect(() => {
     fetchChangesSummary();
@@ -181,6 +225,9 @@ export default function Chat() {
     const prompt = input.trim();
     if (!prompt || streaming) return;
 
+    preRequestSnapshotRef.current = signatureByPath(changesSummary);
+    setReviewActionMsg('');
+
     setInput('');
     setReasoning('');
     setStreaming(true);
@@ -212,6 +259,7 @@ export default function Chat() {
       const decoder = new TextDecoder();
       let buf = '';
       let reasoningAcc = '';
+      let sawServerError = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -277,6 +325,7 @@ export default function Chat() {
               break;
 
             case 'error':
+              sawServerError = true;
               setMessages((prev) => [
                 ...prev,
                 { role: 'error', text: event.message },
@@ -306,10 +355,14 @@ export default function Chat() {
         if (target?.role === 'agent') {
           const text = typeof target.text === 'string' ? target.text.trim() : '';
           if (!text) {
-            next[finalIdx] = {
-              role: 'error',
-              text: 'No response content was returned by the agent. Check backend auth/token setup.',
-            };
+            if (sawServerError) {
+              next.splice(finalIdx, 1);
+            } else {
+              next[finalIdx] = {
+                role: 'error',
+                text: 'No response content was returned by the agent. Check backend auth/token setup.',
+              };
+            }
           } else {
             next[finalIdx] = { ...target, streaming: false };
           }
@@ -327,7 +380,16 @@ export default function Chat() {
     } finally {
       setStreaming(false);
       abortRef.current = null;
-      fetchChangesSummary();
+      const nextSummary = await fetchChangesSummary();
+      const before = preRequestSnapshotRef.current;
+      const after = signatureByPath(nextSummary);
+      const touched = [];
+      for (const filePath of new Set([...before.keys(), ...after.keys()])) {
+        if (before.get(filePath) !== after.get(filePath)) {
+          touched.push(filePath);
+        }
+      }
+      setPendingReviewPaths(touched);
     }
   }
 
@@ -343,6 +405,11 @@ export default function Chat() {
       return next;
     });
   }
+
+  const reviewFileSet = new Set(pendingReviewPaths);
+  const displayFiles = reviewFileSet.size
+    ? changesSummary.files.filter((file) => reviewFileSet.has(file.path))
+    : changesSummary.files;
 
   return (
     <div className="flex flex-col h-full">
@@ -386,23 +453,59 @@ export default function Chat() {
               <span className="ml-1 text-red-400">-{changesSummary.totals.removed}</span>
             </span>
           </button>
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-vscode-text-muted/70">
+              Review
+            </span>
           <button
             type="button"
-            onClick={fetchChangesSummary}
-            disabled={changesLoading}
-            className="ml-auto text-[11px] text-vscode-text-muted hover:text-vscode-text disabled:opacity-40"
-            style={{ background: 'none', border: 'none', outline: 'none' }}
+            onClick={handleKeepAgentChanges}
+            disabled={!pendingReviewPaths.length || streaming}
+            title="Keep latest agent changes"
+            className="h-6 px-2 rounded border border-vscode-border text-[11px]
+                       text-vscode-text-muted hover:text-vscode-text hover:bg-vscode-sidebar-hover
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: 'transparent', outline: 'none' }}
           >
-            {changesLoading ? 'Refreshing…' : 'Refresh'}
+            Keep
           </button>
+          <button
+            type="button"
+            onClick={handleUndoAgentChanges}
+            disabled={!pendingReviewPaths.length || streaming || undoBusy}
+            title="Undo latest agent changes"
+            className="h-6 px-2 rounded border border-vscode-border text-[11px]
+                       text-vscode-text-muted hover:text-vscode-text hover:bg-vscode-sidebar-hover
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: 'transparent', outline: 'none' }}
+          >
+            {undoBusy ? 'Undoing…' : 'Undo'}
+          </button>
+          </div>
         </div>
+
+        {reviewActionMsg && (
+          <p className="mt-1 text-[11px] text-vscode-text-muted">{reviewActionMsg}</p>
+        )}
 
         {changesOpen && (
           <div className="mt-2 max-h-36 overflow-y-auto rounded border border-vscode-border bg-vscode-bg">
-            {changesSummary.files.length === 0 ? (
+            <div className="px-2.5 py-1 border-b border-vscode-border flex items-center justify-between">
+              <span className="text-[10px] uppercase tracking-wider text-vscode-text-muted">Changed files</span>
+              <button
+                type="button"
+                onClick={fetchChangesSummary}
+                disabled={changesLoading}
+                className="text-[10px] text-vscode-text-muted hover:text-vscode-text disabled:opacity-40"
+                style={{ background: 'none', border: 'none', outline: 'none' }}
+              >
+                {changesLoading ? 'Refreshing…' : 'Refresh'}
+              </button>
+            </div>
+            {displayFiles.length === 0 ? (
               <p className="px-2.5 py-2 text-xs text-vscode-text-muted">No local changes.</p>
             ) : (
-              changesSummary.files.map((file) => (
+              displayFiles.map((file) => (
                 <div key={file.path} className="px-2.5 py-1.5 text-xs border-b border-vscode-border last:border-b-0 flex items-center gap-2">
                   <span className="text-vscode-text truncate flex-1">{file.path}</span>
                   <span className="text-green-400">+{file.added || 0}</span>
