@@ -53,7 +53,7 @@ function EmptyState() {
         <line x1="8" y1="13" x2="16" y2="13" />
         <line x1="8" y1="17" x2="16" y2="17" />
       </svg>
-      <p className="text-sm opacity-50">Open a file from the Explorer</p>
+      <p className="text-sm opacity-50">Open a file from the Workspace</p>
     </div>
   );
 }

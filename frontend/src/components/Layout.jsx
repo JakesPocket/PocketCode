@@ -23,16 +23,7 @@ function useVisualViewportHeight() {
 }
 
 // Icons as tiny inline components so there are no extra dependencies
-function IconMenu() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-      strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" aria-hidden="true">
-      <line x1="3" y1="6"  x2="21" y2="6"  />
-      <line x1="3" y1="12" x2="21" y2="12" />
-      <line x1="3" y1="18" x2="21" y2="18" />
-    </svg>
-  );
-}
+
 
 function IconLayers() {
   return (
@@ -87,7 +78,7 @@ function IconSettings() {
 }
 
 const TAB_ITEMS = [
-  { id: 'extensions', label: 'Explorer' },
+  { id: 'extensions', label: 'Workspace' },
   { id: 'editor',     label: 'Editor'   },
   { id: 'ai-chat',    label: 'AI Chat'  },
   { id: 'terminal',   label: 'Terminal' },
@@ -95,7 +86,7 @@ const TAB_ITEMS = [
 ];
 
 function TabIcon({ id, isActive }) {
-  if (id === 'extensions') return isActive ? <IconMenu /> : <IconLayers />;
+  if (id === 'extensions') return <IconLayers />;
   if (id === 'editor')     return <IconFile />;
   if (id === 'ai-chat')    return <IconChat />;
   if (id === 'terminal')   return <IconTerminal />;

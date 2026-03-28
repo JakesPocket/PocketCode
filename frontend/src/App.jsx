@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import Layout from './components/Layout';
-import ExtensionsView from './components/ExtensionsView';
+import WorkspaceView from './components/WorkspaceView';
 import EditorView from './components/EditorView';
 import TerminalView from './components/TerminalView';
 import Chat from './Chat';
@@ -183,7 +183,7 @@ function App() {
     <>
       <Layout activeTab={activeTab} onTabChange={setActiveTab}>
         <div className={activeTab === 'extensions' ? 'h-full' : 'hidden h-full'}>
-          <ExtensionsView key={`extensions-${workspaceEpoch}`} onOpenFile={handleOpenFile} />
+          <WorkspaceView key={`workspace-${workspaceEpoch}`} onOpenFile={handleOpenFile} />
         </div>
         <div className={activeTab === 'editor' ? 'h-full' : 'hidden h-full'}>
           <EditorView
