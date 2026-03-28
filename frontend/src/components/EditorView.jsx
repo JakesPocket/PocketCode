@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
+import { history, undo, redo, undoDepth, redoDepth } from '@codemirror/commands';
 import {
   EditorView as CodeMirrorView,
   drawSelection,
@@ -13,6 +14,23 @@ import { python } from '@codemirror/lang-python';
 import { html } from '@codemirror/lang-html';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { apiUrl } from '../config/server';
+import { readJson, writeJson } from '../utils/persist';
+
+const EDITOR_CONTENTS_KEY = 'pocketide.editor.fileContents.v1';
+
+function readInitialFileContents() {
+  const stored = readJson(EDITOR_CONTENTS_KEY, {});
+  if (!stored || typeof stored !== 'object') return {};
+
+  const next = {};
+  for (const [path, value] of Object.entries(stored)) {
+    if (typeof path !== 'string') continue;
+    if (typeof value === 'string' || value === null) {
+      next[path] = value;
+    }
+  }
+  return next;
+}
 
 function IconClose() {
   return (
@@ -41,21 +59,33 @@ function EmptyState() {
 }
 
 export default function EditorView({ openFiles, activeFilePath, onSelectFile, onCloseFile }) {
-  const [fileContents, setFileContents] = useState({}); // path → local editor content
+  const [fileContents, setFileContents] = useState(() => readInitialFileContents()); // path → local editor content
   const [serverContents, setServerContents] = useState({}); // path → last fetched server content
   const [loadingPath, setLoadingPath] = useState(null);
   const [errorPath, setErrorPath] = useState(null);
+  const [editModeByPath, setEditModeByPath] = useState({}); // path -> boolean
+  const [saveBusyByPath, setSaveBusyByPath] = useState({}); // path -> boolean
+  const [saveErrorByPath, setSaveErrorByPath] = useState({}); // path -> string
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const [editModeMessage, setEditModeMessage] = useState(''); // tmp msg when undo/redo clicked in view mode
 
   const editorHostRef = useRef(null);
   const editorViewRef = useRef(null);
+  const editabilityCompartmentRef = useRef(new Compartment());
   const sessionsRef = useRef(new Map()); // path -> { state, scrollTop, scrollLeft }
   const activePathRef = useRef(activeFilePath);
   const fileContentsRef = useRef(fileContents);
   const serverContentsRef = useRef(serverContents);
   const pollingBusyRef = useRef(false);
+  const editModeMessageTimerRef = useRef(null);
 
   useEffect(() => {
     fileContentsRef.current = fileContents;
+  }, [fileContents]);
+
+  useEffect(() => {
+    writeJson(EDITOR_CONTENTS_KEY, fileContents);
   }, [fileContents]);
 
   useEffect(() => {
@@ -81,6 +111,16 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
     };
   }, []);
 
+  function isPathEditMode(path) {
+    if (!path) return false;
+    return editModeByPath[path] ?? false;
+  }
+
+  function updateHistoryAvailability(state) {
+    setCanUndo(undoDepth(state) > 0);
+    setCanRedo(redoDepth(state) > 0);
+  }
+
   function createEditorState(filePath, doc) {
     return EditorState.create({
       doc,
@@ -90,8 +130,13 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
         highlightActiveLineGutter(),
         drawSelection(),
         crosshairCursor(),
+        history(),
         oneDark,
         languageExtensionForPath(filePath),
+        editabilityCompartmentRef.current.of([
+          EditorState.readOnly.of(!isPathEditMode(filePath)),
+          CodeMirrorView.editable.of(isPathEditMode(filePath)),
+        ]),
         CodeMirrorView.lineWrapping,
         CodeMirrorView.updateListener.of((update) => {
           const currentPath = activePathRef.current;
@@ -103,6 +148,8 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
             scrollTop: update.view.scrollDOM.scrollTop,
             scrollLeft: update.view.scrollDOM.scrollLeft,
           });
+
+          updateHistoryAvailability(update.state);
 
           if (!update.docChanged) return;
 
@@ -139,6 +186,7 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
 
     if (view.state !== targetState) {
       view.setState(targetState);
+      updateHistoryAvailability(targetState);
     }
 
     const targetScrollTop = existing?.scrollTop ?? 0;
@@ -160,10 +208,15 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
       parent: editorHostRef.current,
     });
 
+    updateHistoryAvailability(editorViewRef.current.state);
+
     return () => {
       saveSessionForPath(activePathRef.current);
       editorViewRef.current?.destroy();
       editorViewRef.current = null;
+      if (editModeMessageTimerRef.current) {
+        clearTimeout(editModeMessageTimerRef.current);
+      }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -215,6 +268,30 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
     for (const path of [...sessionsRef.current.keys()]) {
       if (!openPathSet.has(path)) sessionsRef.current.delete(path);
     }
+
+    setEditModeByPath((prev) => {
+      const next = {};
+      for (const [path, value] of Object.entries(prev)) {
+        if (openPathSet.has(path)) next[path] = value;
+      }
+      return next;
+    });
+
+    setSaveBusyByPath((prev) => {
+      const next = {};
+      for (const [path, value] of Object.entries(prev)) {
+        if (openPathSet.has(path)) next[path] = value;
+      }
+      return next;
+    });
+
+    setSaveErrorByPath((prev) => {
+      const next = {};
+      for (const [path, value] of Object.entries(prev)) {
+        if (openPathSet.has(path)) next[path] = value;
+      }
+      return next;
+    });
   }, [openFiles]);
 
   // Switch CodeMirror session whenever active file tab changes.
@@ -252,20 +329,17 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
     const currentDoc = view.state.doc.toString();
     if (incoming === currentDoc) return;
 
+    // External sync should replace stale history so Undo only tracks
+    // user edits for the current in-memory version of this file.
     const scrollTop = view.scrollDOM.scrollTop;
     const scrollLeft = view.scrollDOM.scrollLeft;
-    const maxPos = incoming.length;
-    const selection = view.state.selection.main;
-    const anchor = Math.min(selection.anchor, maxPos);
-    const head = Math.min(selection.head, maxPos);
 
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: incoming },
-      selection: { anchor, head },
-    });
+    const nextState = createEditorState(activeFilePath, incoming);
+    view.setState(nextState);
+    updateHistoryAvailability(nextState);
 
     sessionsRef.current.set(activeFilePath, {
-      state: view.state,
+      state: nextState,
       scrollTop,
       scrollLeft,
     });
@@ -276,6 +350,23 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
       editorViewRef.current.scrollDOM.scrollLeft = scrollLeft;
     });
   }, [activeFilePath, fileContents]);
+
+  useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view) return;
+
+    const currentPath = activePathRef.current;
+    const editable = isPathEditMode(currentPath);
+
+    view.dispatch({
+      effects: editabilityCompartmentRef.current.reconfigure([
+        EditorState.readOnly.of(!editable),
+        CodeMirrorView.editable.of(editable),
+      ]),
+    });
+
+    updateHistoryAvailability(view.state);
+  }, [activeFilePath, editModeByPath]);
 
   // Poll open files to reflect external edits made by the AI agent.
   useEffect(() => {
@@ -319,6 +410,97 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
   const content = activeFilePath ? fileContents[activeFilePath] : undefined;
   const isLoading = loadingPath === activeFilePath;
   const hasError = errorPath === activeFilePath;
+  const isEditMode = activeFilePath ? (editModeByPath[activeFilePath] ?? false) : false;
+  const saveBusy = activeFilePath ? Boolean(saveBusyByPath[activeFilePath]) : false;
+  const saveError = activeFilePath ? (saveErrorByPath[activeFilePath] ?? '') : '';
+  const isDirty = Boolean(
+    activeFilePath
+    && fileContents[activeFilePath] !== undefined
+    && fileContents[activeFilePath] !== null
+    && serverContents[activeFilePath] !== undefined
+    && fileContents[activeFilePath] !== serverContents[activeFilePath]
+  );
+
+  function handleUndoClick() {
+    if (!isEditMode) {
+      setEditModeMessage('Must be in edit mode to undo');
+      if (editModeMessageTimerRef.current) clearTimeout(editModeMessageTimerRef.current);
+      editModeMessageTimerRef.current = setTimeout(() => {
+        setEditModeMessage('');
+        editModeMessageTimerRef.current = null;
+      }, 2500);
+      return;
+    }
+    const view = editorViewRef.current;
+    if (!view) return;
+    undo(view);
+  }
+
+  function handleRedoClick() {
+    if (!isEditMode) {
+      setEditModeMessage('Must be in edit mode to redo');
+      if (editModeMessageTimerRef.current) clearTimeout(editModeMessageTimerRef.current);
+      editModeMessageTimerRef.current = setTimeout(() => {
+        setEditModeMessage('');
+        editModeMessageTimerRef.current = null;
+      }, 2500);
+      return;
+    }
+    const view = editorViewRef.current;
+    if (!view) return;
+    redo(view);
+  }
+
+  async function handleToggleEditSave() {
+    if (!activeFilePath || isLoading || hasError) return;
+
+    const currentPath = activeFilePath;
+
+    setSaveErrorByPath((prev) => ({ ...prev, [currentPath]: '' }));
+
+    if (!isEditMode) {
+      if (editModeMessageTimerRef.current) {
+        clearTimeout(editModeMessageTimerRef.current);
+        editModeMessageTimerRef.current = null;
+      }
+      setEditModeMessage('');
+      setEditModeByPath((prev) => ({ ...prev, [currentPath]: true }));
+      return;
+    }
+
+    if (!isDirty) {
+      setEditModeByPath((prev) => ({ ...prev, [currentPath]: false }));
+      return;
+    }
+
+    const nextContent = fileContents[currentPath];
+    if (typeof nextContent !== 'string') return;
+
+    setSaveBusyByPath((prev) => ({ ...prev, [currentPath]: true }));
+    try {
+      const response = await fetch(apiUrl('/api/file'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: currentPath, content: nextContent }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setSaveErrorByPath((prev) => ({
+          ...prev,
+          [currentPath]: payload.error || `Failed to save (${response.status})`,
+        }));
+        return;
+      }
+
+      setServerContents((prev) => ({ ...prev, [currentPath]: nextContent }));
+      setEditModeByPath((prev) => ({ ...prev, [currentPath]: false }));
+    } catch (_) {
+      setSaveErrorByPath((prev) => ({ ...prev, [currentPath]: 'Could not save file' }));
+    } finally {
+      setSaveBusyByPath((prev) => ({ ...prev, [currentPath]: false }));
+    }
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -335,8 +517,8 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
                 key={file.path}
                 className={[
                   'flex items-center gap-2 px-3 shrink-0 cursor-pointer',
-                  'min-h-[44px] border-r border-vscode-border transition-colors',
-                  'text-sm select-none',
+                  'min-h-[34px] border-r border-vscode-border transition-colors',
+                  'text-xs select-none',
                   isActive
                     ? 'text-vscode-text border-t-2 border-t-vscode-accent'
                     : 'text-vscode-text-muted hover:text-vscode-text hover:bg-vscode-sidebar',
@@ -368,6 +550,71 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
         </div>
       )}
 
+      {openFiles.length > 0 && (
+        <div
+          className="flex items-center justify-between px-2 py-1.5 border-b border-vscode-border shrink-0"
+          style={{ backgroundColor: 'var(--color-vscode-sidebar)' }}
+        >
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={handleUndoClick}
+              disabled={!canUndo}
+              className={[
+                'px-2 py-1 rounded text-xs border-none transition-colors',
+                canUndo
+                  ? 'text-vscode-text hover:bg-vscode-sidebar-hover cursor-pointer'
+                  : 'text-vscode-text-muted opacity-50 cursor-not-allowed',
+              ].join(' ')}
+              style={{ background: 'transparent' }}
+            >
+              Undo
+            </button>
+            <button
+              type="button"
+              onClick={handleRedoClick}
+              disabled={!canRedo}
+              className={[
+                'px-2 py-1 rounded text-xs border-none transition-colors',
+                canRedo
+                  ? 'text-vscode-text hover:bg-vscode-sidebar-hover cursor-pointer'
+                  : 'text-vscode-text-muted opacity-50 cursor-not-allowed',
+              ].join(' ')}
+              style={{ background: 'transparent' }}
+            >
+              Redo
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {editModeMessage && (
+              <span className="text-[11px] text-amber-400">{editModeMessage}</span>
+            )}
+            {saveError && (
+              <span className="text-[11px] text-red-400">{saveError}</span>
+            )}
+            {isDirty && isEditMode && !saveError && (
+              <span className="text-[11px] text-vscode-text-muted">Unsaved</span>
+            )}
+            <button
+              type="button"
+              onClick={handleToggleEditSave}
+              disabled={!activeFilePath || isLoading || hasError || saveBusy}
+              className={[
+                'px-2.5 py-1 rounded text-xs font-medium border cursor-pointer transition-colors',
+                (!activeFilePath || isLoading || hasError || saveBusy)
+                  ? 'opacity-50 cursor-not-allowed border-vscode-border text-vscode-text-muted'
+                  : (isEditMode
+                    ? 'bg-vscode-accent text-white border-transparent'
+                    : 'bg-transparent text-vscode-text border-vscode-border hover:bg-vscode-sidebar-hover'),
+              ].join(' ')}
+            >
+              {saveBusy ? 'Saving...' : (isEditMode ? 'Save' : 'Edit')}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Editor body ── */}
       <div className="flex-1 overflow-auto">
         {openFiles.length === 0 && <EmptyState />}
@@ -388,11 +635,14 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
           </p>
         )}
 
-        {openFiles.length > 0 && !isLoading && !hasError && content !== undefined && (
-          <div className="h-full min-h-0">
-            <div ref={editorHostRef} className="editor-cm-shell h-full" />
-          </div>
-        )}
+        <div
+          className={[
+            'h-full min-h-0',
+            openFiles.length > 0 && !isLoading && !hasError && content !== undefined ? '' : 'hidden',
+          ].join(' ')}
+        >
+          <div ref={editorHostRef} className="editor-cm-shell h-full" />
+        </div>
       </div>
     </div>
   );

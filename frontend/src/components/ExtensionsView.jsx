@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react';
 import { apiUrl } from '../config/server';
+import { readText, writeText } from '../utils/persist';
+
+const EXTENSIONS_TAB_KEY = 'pocketide.extensions.activeSubTab.v1';
 
 function IconFolder({ open }) {
   return (
@@ -82,10 +85,17 @@ const SUB_TABS = [
 ];
 
 export default function ExtensionsView({ onOpenFile }) {
-  const [activeSubTab, setActiveSubTab] = useState('file-explorer');
+  const [activeSubTab, setActiveSubTab] = useState(() => {
+    const stored = readText(EXTENSIONS_TAB_KEY, 'file-explorer');
+    return SUB_TABS.some((tab) => tab.id === stored) ? stored : 'file-explorer';
+  });
   const [fileTree, setFileTree] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    writeText(EXTENSIONS_TAB_KEY, activeSubTab);
+  }, [activeSubTab]);
 
   useEffect(() => {
     if (activeSubTab !== 'file-explorer') return;
