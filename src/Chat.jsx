@@ -4,6 +4,13 @@ import { readJson, writeJson, readText, writeText } from './utils/persist';
 
 const CHAT_MESSAGES_KEY = 'pocketide.chat.messages.v1';
 const CHAT_INPUT_KEY = 'pocketide.chat.input.v1';
+const CHAT_PENDING_REVIEW_KEY = 'pocketide.chat.pendingReviewPaths.v1';
+
+function readInitialPendingReviewPaths() {
+  const stored = readJson(CHAT_PENDING_REVIEW_KEY, []);
+  if (!Array.isArray(stored)) return [];
+  return stored.filter((value) => typeof value === 'string' && value.trim());
+}
 
 function readInitialMessages() {
   const fallback = [
@@ -211,7 +218,7 @@ export default function Chat() {
   const [changesSummary, setChangesSummary] = useState({ totals: { files: 0, added: 0, removed: 0 }, files: [] });
   const [changesOpen, setChangesOpen] = useState(false);
   const [changesLoading, setChangesLoading] = useState(false);
-  const [pendingReviewPaths, setPendingReviewPaths] = useState([]);
+  const [pendingReviewPaths, setPendingReviewPaths] = useState(readInitialPendingReviewPaths);
   const [reviewActionMsg, setReviewActionMsg] = useState('');
   const [undoBusy, setUndoBusy] = useState(false);
   const bottomRef = useRef(null);
@@ -301,6 +308,25 @@ export default function Chat() {
   useEffect(() => {
     writeText(CHAT_INPUT_KEY, input);
   }, [input]);
+
+  useEffect(() => {
+    writeJson(CHAT_PENDING_REVIEW_KEY, pendingReviewPaths);
+  }, [pendingReviewPaths]);
+
+  useEffect(() => {
+    if (!changesSummary.files.length && pendingReviewPaths.length) {
+      setPendingReviewPaths([]);
+      return;
+    }
+
+    if (!pendingReviewPaths.length) return;
+
+    const changedPaths = new Set(changesSummary.files.map((file) => file.path));
+    const next = pendingReviewPaths.filter((filePath) => changedPaths.has(filePath));
+    if (next.length !== pendingReviewPaths.length) {
+      setPendingReviewPaths(next);
+    }
+  }, [changesSummary.files, pendingReviewPaths]);
 
   async function handleSend(e) {
     e.preventDefault();
