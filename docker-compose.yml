@@ -9,7 +9,7 @@ services:
     ports:
       - "5174:5174"
     volumes:
-      - ./frontend:/app
+      - ./:/app
       - /app/node_modules
     environment:
       - VITE_SERVER_URL=${VITE_SERVER_URL:-http://host.docker.internal:3000}
