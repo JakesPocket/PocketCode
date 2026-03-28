@@ -359,6 +359,19 @@ export default function Chat() {
   const abortRef = useRef(null);
   const preRequestSnapshotRef = useRef(new Map());
 
+  function finalizePendingToolCalls(output = null) {
+    setMessages((prev) => prev.map((msg) => {
+      if (msg.role === 'tool' && !msg.done) {
+        return {
+          ...msg,
+          done: true,
+          output: msg.output ?? output,
+        };
+      }
+      return msg;
+    }));
+  }
+
   const fetchChangesSummary = useCallback(async () => {
     setChangesLoading(true);
     try {
@@ -572,12 +585,24 @@ export default function Chat() {
             case 'tool_result':
               setMessages((prev) => {
                 const next = [...prev];
-                // Mark the last matching tool bubble as done
+                // Prefer exact tool-name match; fallback to last pending tool.
+                let matchedIndex = -1;
                 for (let i = next.length - 1; i >= 0; i--) {
                   if (next[i].role === 'tool' && next[i].tool === event.tool && !next[i].done) {
-                    next[i] = { ...next[i], done: true, output: event.output ?? null };
+                    matchedIndex = i;
                     break;
                   }
+                }
+                if (matchedIndex === -1) {
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    if (next[i].role === 'tool' && !next[i].done) {
+                      matchedIndex = i;
+                      break;
+                    }
+                  }
+                }
+                if (matchedIndex !== -1) {
+                  next[matchedIndex] = { ...next[matchedIndex], done: true, output: event.output ?? null };
                 }
                 return next;
               });
@@ -613,6 +638,7 @@ export default function Chat() {
               break;
 
             case 'done':
+              finalizePendingToolCalls();
               break;
           }
         }
@@ -655,12 +681,14 @@ export default function Chat() {
 
     } catch (err) {
       if (err.name !== 'AbortError') {
+        finalizePendingToolCalls({ error: err.message || 'Tool execution ended with error.' });
         setMessages((prev) => [
           ...prev.filter((m) => !(m.role === 'agent' && m.text === '' && m.streaming)),
           { role: 'error', text: err.message },
         ]);
       }
     } finally {
+      finalizePendingToolCalls();
       setStreaming(false);
       abortRef.current = null;
       const nextSummary = await fetchChangesSummary();
@@ -680,6 +708,7 @@ export default function Chat() {
 
   function handleAbort() {
     abortRef.current?.abort();
+    finalizePendingToolCalls({ cancelled: true });
     setStreaming(false);
     setMessages((prev) => {
       const next = [...prev];
