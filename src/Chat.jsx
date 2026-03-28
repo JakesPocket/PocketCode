@@ -217,23 +217,16 @@ function AgentBubble({ text, streaming }) {
   return (
     <div className="flex justify-start">
       <div className="max-w-[92%] min-w-0">
-        <div className="flex items-center gap-2 mb-1">
-          <div className="w-5 h-5 rounded-md bg-vscode-accent/20 text-vscode-accent flex items-center justify-center text-[11px] font-semibold border border-vscode-accent/40">
-            A
-          </div>
-        </div>
-        <div className="pl-7">
+        <div className="pl-0">
           {chunks.length === 0 ? <TextBlock text="" /> : chunks.map((chunk, idx) => (
             chunk.type === 'code'
               ? <CodeBlock key={idx} code={chunk.value} lang={chunk.lang} />
               : <TextBlock key={idx} text={chunk.value} />
           ))}
-        </div>
-        {streaming && (
-          <div className="pl-7 mt-1">
+          {streaming && (
             <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-vscode-accent align-middle rounded-sm animate-pulse" />
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
