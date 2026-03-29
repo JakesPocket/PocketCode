@@ -5,6 +5,13 @@ import { readJson, writeJson, readText, writeText } from './utils/persist';
 const CHAT_MESSAGES_KEY = 'pocketide.chat.messages.v1';
 const CHAT_INPUT_KEY = 'pocketide.chat.input.v1';
 const CHAT_PENDING_REVIEW_KEY = 'pocketide.chat.pendingReviewPaths.v1';
+const CHAT_UI_AGENT_KEY = 'pocketide.chat.ui.agent.v1';
+const CHAT_TURN_AI_MODES_KEY = 'pocketide.chat.turnAiModes.v1';
+
+function normalizeMode(value) {
+  const mode = String(value || '').toLowerCase().trim();
+  return ['agent', 'ask', 'plan'].includes(mode) ? mode : null;
+}
 
 function createMessageId() {
   if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
@@ -28,13 +35,18 @@ function normalizeStoredMessage(msg) {
     };
   }
 
-  if (['user', 'agent', 'reasoning', 'error'].includes(msg.role)) {
+  if (['user', 'agent', 'reasoning', 'error', 'handoff'].includes(msg.role)) {
     return {
       id: typeof msg.id === 'string' && msg.id ? msg.id : createMessageId(),
       turnId: typeof msg.turnId === 'string' ? msg.turnId : null,
       role: msg.role,
       text: typeof msg.text === 'string' ? msg.text : '',
+      aiMode: normalizeMode(msg.aiMode),
+      options: Array.isArray(msg.options) ? msg.options : null,
+      selectedMode: normalizeMode(msg.selectedMode),
       streaming: Boolean(msg.streaming),
+      isTimeout: Boolean(msg.isTimeout),
+      isLoop: Boolean(msg.isLoop),
     };
   }
 
@@ -61,10 +73,93 @@ function readInitialMessages() {
   return next.length > 0 ? next : fallback;
 }
 
+function readInitialTurnAiModes() {
+  const rawMap = readJson(CHAT_TURN_AI_MODES_KEY, {});
+  const persisted = {};
+
+  if (rawMap && typeof rawMap === 'object') {
+    for (const [turnId, mode] of Object.entries(rawMap)) {
+      const normalized = normalizeMode(mode);
+      if (normalized && turnId) persisted[turnId] = normalized;
+    }
+  }
+
+  const storedMessages = readJson(CHAT_MESSAGES_KEY, []);
+  if (Array.isArray(storedMessages)) {
+    for (const msg of storedMessages) {
+      if (!msg || typeof msg !== 'object') continue;
+      const turnId = typeof msg.turnId === 'string' ? msg.turnId : null;
+      const mode = normalizeMode(msg.aiMode);
+      if (turnId && mode && !persisted[turnId]) {
+        persisted[turnId] = mode;
+      }
+    }
+  }
+
+  return persisted;
+}
+
+function getLatestPlanResponseText(messages, turnAiModes) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || msg.role !== 'agent') continue;
+    const mode = (msg.turnId ? turnAiModes[msg.turnId] : null) || normalizeMode(msg.aiMode);
+    if (mode !== 'plan') continue;
+    if (typeof msg.text !== 'string' || !msg.text.trim()) continue;
+    if (/recommended plan|possible next steps/i.test(msg.text)) {
+      return msg.text.trim();
+    }
+  }
+  return null;
+}
+
+function resolvePlanContinuationChoice(prompt) {
+  const normalized = String(prompt || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) return null;
+
+  if (['1', 'start', 'start now', 'go', 'go ahead', 'do it', 'implement'].includes(normalized)) {
+    return 'start';
+  }
+  if (['2', 'explore', 'explore first', 'inspect first', 'locate first'].includes(normalized)) {
+    return 'explore';
+  }
+  if (['3', 'cancel', 'stop', 'never mind', 'nevermind'].includes(normalized)) {
+    return 'cancel';
+  }
+
+  return null;
+}
+
+function buildModeSwitchContinuationPrompt(userPrompt, mode, planText, choice) {
+  if (!planText || !choice || mode === 'plan') return userPrompt;
+
+  const choiceText = choice === 'start'
+    ? 'Start implementation now'
+    : choice === 'explore'
+      ? 'Explore first before touching files'
+      : 'Cancel and do nothing';
+
+  const compactPlan = planText.length > 1800 ? `${planText.slice(0, 1800)}\n...` : planText;
+  return [
+    `User switched to ${mode.toUpperCase()} mode and is continuing a previous PLAN response.`,
+    `Interpret the user's message as selecting: ${choiceText}.`,
+    `Original user message: "${userPrompt}"`,
+    '',
+    'Previous PLAN response context:',
+    compactPlan,
+  ].join('\n');
+}
+
 // ── Message types ──────────────────────────────────────────────────────────
 // { role: 'user',   text: string }
 // { role: 'agent',  text: string, streaming?: bool }
 // { role: 'tool',   tool: string, done?: bool, input?: unknown, output?: unknown }
+// { role: 'handoff', text: string, options?: Array<{ mode: string, label: string }>, selectedMode?: string }
 // { role: 'error',  text: string }
 
 function summarizeTool(tool, input) {
@@ -107,11 +202,22 @@ function formatToolPayload(value) {
   }
 }
 
-function UserBubble({ text }) {
+const MODE_BUBBLE_COLORS = {
+  agent: { bg: 'rgba(100,200,100,0.34)', border: 'rgba(100,200,100,0.72)' },
+  ask:   { bg: 'rgba(255,165,0,0.34)',   border: 'rgba(255,165,0,0.72)'   },
+  plan:  { bg: 'rgba(100,150,255,0.34)', border: 'rgba(100,150,255,0.72)' },
+};
+
+function UserBubble({ text, mode, longPressHandlers }) {
+  const colors = MODE_BUBBLE_COLORS[mode];
   return (
-    <div className="flex justify-end">
-      <div className="max-w-[88%] px-3 py-2 rounded-xl text-sm
-                      bg-vscode-accent/20 text-vscode-text break-words leading-relaxed border border-vscode-accent/40">
+    <div className="flex justify-end" {...(longPressHandlers || {})}>
+      <div
+        className="max-w-[88%] px-3 py-2 rounded-xl text-sm text-vscode-text break-words leading-relaxed"
+        style={colors
+          ? { backgroundColor: colors.bg, border: `1px solid ${colors.border}` }
+          : { backgroundColor: 'var(--color-vscode-accent-20)', border: '1px solid var(--color-vscode-accent-40)' }}
+      >
         <div className="whitespace-pre-wrap">{text}</div>
       </div>
     </div>
@@ -302,6 +408,52 @@ function ToolCallBubble({ tool, done, input, output }) {
   );
 }
 
+function ToolTimelineRow({ tool, done, input, output }) {
+  const [open, setOpen] = useState(false);
+  const summary = summarizeTool(tool, input);
+  const inputText = formatToolPayload(input);
+  const outputText = formatToolPayload(output);
+  const hasDetails = !!(inputText || outputText);
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => hasDetails && setOpen((v) => !v)}
+        className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-left ${hasDetails ? 'cursor-pointer' : 'cursor-default'}`}
+        style={{ background: 'none', border: 'none', outline: 'none' }}
+      >
+        {!done ? (
+          <svg className="w-3 h-3 shrink-0 animate-spin text-vscode-accent"
+            viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M21 12a9 9 0 11-6.22-8.56" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <svg className="w-3 h-3 shrink-0 text-green-500"
+            viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+        )}
+        <span className="text-[11px] text-vscode-text truncate flex-1 min-w-0">{summary}</span>
+        {hasDetails && (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+            strokeLinecap="round" strokeLinejoin="round"
+            className={`w-3 h-3 shrink-0 text-vscode-text-muted transition-transform ${open ? 'rotate-180' : ''}`}>
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        )}
+      </button>
+      {open && (
+        <div className="pl-7 pr-2.5 pb-2 border-t border-vscode-border/30">
+          {inputText && <TruncatedPayload text={inputText} label="Input" />}
+          {outputText && <TruncatedPayload text={outputText} label="Result" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const PAYLOAD_PREVIEW_LIMIT = 2000;
 
 function TruncatedPayload({ text, label }) {
@@ -369,6 +521,24 @@ function ThinkingPlaceholderBubble({ text }) {
   );
 }
 
+function ErrorBubble({ text, isTimeout, isLoop, onContinue, className = '' }) {
+  return (
+    <div className={`px-3 py-2 rounded-xl text-sm bg-red-900/30 text-red-400 border border-red-900/50 break-words ${className}`}>
+      <div>{text}</div>
+      {isTimeout && !isLoop && onContinue && (
+        <button
+          type="button"
+          onClick={onContinue}
+          className="mt-2 px-3 py-1 rounded-lg text-xs text-red-300 border border-red-400/40 hover:bg-red-900/40"
+          style={{ background: 'rgba(255,60,60,0.1)', outline: 'none', cursor: 'pointer' }}
+        >
+          Continue
+        </button>
+      )}
+    </div>
+  );
+}
+
 function TurnToolTimeline({ tools }) {
   const hasRunning = tools.some((t) => !t.done);
   const [open, setOpen] = useState(hasRunning);
@@ -382,7 +552,7 @@ function TurnToolTimeline({ tools }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2 px-2.5 py-2 text-left text-xs"
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-xs"
         style={{ background: 'none', border: 'none', outline: 'none' }}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
@@ -390,13 +560,13 @@ function TurnToolTimeline({ tools }) {
           className={`w-3 h-3 text-vscode-text-muted transition-transform ${open ? 'rotate-90' : ''}`}>
           <polyline points="9 18 15 12 9 6" />
         </svg>
-        <span className="text-vscode-text-muted">Steps • {tools.length}</span>
-        <span className="ml-auto text-[11px] text-vscode-text-muted">{hasRunning ? 'Running' : 'Finished'}</span>
+        <span className="text-vscode-text-muted">{tools.length} step{tools.length !== 1 ? 's' : ''}</span>
+        <span className="ml-auto text-[11px] text-vscode-text-muted">{hasRunning ? 'Running' : 'Done'}</span>
       </button>
       {open && (
-        <div className="border-t border-vscode-border">
+        <div className="border-t border-vscode-border/60 divide-y divide-vscode-border/30">
           {tools.map((tool) => (
-            <ToolCallBubble
+            <ToolTimelineRow
               key={tool.id || `${tool.tool}-${tool.turnId || 'na'}`}
               tool={tool.tool}
               done={tool.done}
@@ -410,24 +580,70 @@ function TurnToolTimeline({ tools }) {
   );
 }
 
-function TurnResponseGroup({ messages }) {
-  const reasoning = messages.filter((m) => m.role === 'reasoning');
-  const tools = messages.filter((m) => m.role === 'tool');
-  const agents = messages.filter((m) => m.role === 'agent');
-  const errors = messages.filter((m) => m.role === 'error');
+function TurnResponseGroup({ messages, aiMode = 'agent', longPressHandlers, onContinue }) {
+  const orderedMessages = aiMode === 'plan'
+    ? messages.filter((m) => m.role !== 'reasoning' && m.role !== 'tool')
+    : messages;
+
+  const modeColors = {
+    agent: '#64c864',
+    ask: '#ffa500',
+    plan: '#6496ff',
+  };
+  const modeBgColors = {
+    agent: 'rgba(100, 200, 100, 0.2)',
+    ask: 'rgba(255, 165, 0, 0.2)',
+    plan: 'rgba(100, 150, 255, 0.2)',
+  };
 
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[96%] sm:max-w-[94%] min-w-0 rounded-xl border border-vscode-border bg-vscode-sidebar/40 p-2 sm:p-2.5">
-        <div className="text-[10px] uppercase tracking-wider text-vscode-text-muted mb-1">Copilot</div>
-        {reasoning.map((msg) => <ReasoningBubble key={msg.id} text={msg.text} />)}
-        {tools.length > 0 && <TurnToolTimeline tools={tools} />}
-        {agents.map((msg) => <AgentBubble key={msg.id} text={msg.text} streaming={msg.streaming} />)}
-        {errors.map((msg) => (
-          <div key={msg.id} className="px-3 py-2 rounded-xl text-sm bg-red-900/30 text-red-400 border border-red-900/50 break-words mt-1">
-            {msg.text}
-          </div>
-        ))}
+    <div className="flex justify-start" {...(longPressHandlers || {})}>
+      <div className="max-w-[96%] sm:max-w-[94%] min-w-0 rounded-xl bg-vscode-sidebar/40 p-2 sm:p-2.5" style={{ border: `1px solid ${modeColors[aiMode] || modeColors.agent}80` }}>
+        <div className="text-[10px] uppercase tracking-wider text-vscode-text-muted mb-1 flex items-center gap-2">
+          <span>Copilot</span>
+          <span
+            style={{
+              fontSize: '9px',
+              color: modeColors[aiMode] || modeColors.agent,
+              backgroundColor: modeBgColors[aiMode] || modeBgColors.agent,
+              padding: '2px 8px',
+              borderRadius: '3px',
+              fontWeight: '600',
+            }}
+          >
+            {aiMode.toUpperCase()}
+          </span>
+        </div>
+        <div className="flex flex-col gap-1">
+          {orderedMessages.map((msg) => {
+            if (msg.role === 'reasoning') {
+              return <ReasoningBubble key={msg.id} text={msg.text} />;
+            }
+
+            if (msg.role === 'tool') {
+              return (
+                <div key={msg.id} className="rounded-lg border border-vscode-border/60 bg-vscode-bg/60 overflow-hidden">
+                  <ToolTimelineRow
+                    tool={msg.tool}
+                    done={msg.done}
+                    input={msg.input}
+                    output={msg.output}
+                  />
+                </div>
+              );
+            }
+
+            if (msg.role === 'agent' || msg.role === 'handoff') {
+              return <AgentBubble key={msg.id} text={msg.text} streaming={msg.streaming} />;
+            }
+
+            if (msg.role === 'error') {
+              return <ErrorBubble key={msg.id} text={msg.text} isTimeout={msg.isTimeout} isLoop={msg.isLoop} onContinue={onContinue} className="mt-1" />;
+            }
+
+            return null;
+          })}
+        </div>
       </div>
     </div>
   );
@@ -490,7 +706,7 @@ function buildRenderItems(messages) {
   return items;
 }
 
-export default function ChatView() {
+export default function ChatView({ onOpenDiffFiles }) {
   const [messages, setMessages] = useState(() => readInitialMessages());
   const [reasoning, setReasoning] = useState('');
   const [input, setInput] = useState(() => readText(CHAT_INPUT_KEY, ''));
@@ -506,12 +722,41 @@ export default function ChatView() {
   const [lastStreamEventAt, setLastStreamEventAt] = useState(0);
   const [streamClock, setStreamClock] = useState(0);
   const [quietStage, setQuietStage] = useState('thinking');
+  const [aiMode, setAiMode] = useState(() => readText(CHAT_UI_AGENT_KEY, 'agent'));
+  const [turnAiModes, setTurnAiModes] = useState(readInitialTurnAiModes);
+  const [contextMenu, setContextMenu] = useState(null);
   const bottomRef = useRef(null);
   const scrollRef = useRef(null);
   const abortRef = useRef(null);
   const preRequestSnapshotRef = useRef(new Map());
   const shouldAutoScrollRef = useRef(true);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [showScrollToPrevPrompt, setShowScrollToPrevPrompt] = useState(false);
+  const [showScrollToNextPrompt, setShowScrollToNextPrompt] = useState(false);
   const activeTurnRef = useRef(null);
+  const submitScrollTimerRef = useRef(null);
+  const longPressRef = useRef(null);
+  const submitLongPressRef = useRef(null);
+  const longPressActivatedRef = useRef(false);
+  const composerTextareaRef = useRef(null);
+  const [composerTextareaHeight, setComposerTextareaHeight] = useState(46);
+
+  const composerCounts = useMemo(() => {
+    const trimmed = input.trim();
+    const words = trimmed ? trimmed.split(/\s+/).length : 0;
+    return {
+      words,
+      chars: input.length,
+    };
+  }, [input]);
+
+  const composerMetricVisibility = useMemo(() => {
+    const extraRoom = Math.max(0, composerTextareaHeight - 46);
+    return {
+      showChars: extraRoom >= 22,
+      showWords: extraRoom >= 44,
+    };
+  }, [composerTextareaHeight]);
 
   function finalizePendingToolCalls(turnId = null, output = null) {
     setMessages((prev) => prev.map((msg) => {
@@ -598,7 +843,7 @@ export default function ChatView() {
     }
   }
 
-  function handleKeepAgentChanges() {
+  async function handleKeepAgentChanges() {
     const targetPaths = pendingReviewPaths;
 
     if (!targetPaths.length) return;
@@ -615,6 +860,13 @@ export default function ChatView() {
 
     setPendingReviewPaths([]);
     setReviewActionMsg('');
+
+    // Snapshot current file content so future diffs show only changes since this keep.
+    fetch(apiUrl('/api/git/keep-snapshot'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: targetPaths }),
+    }).catch(() => {});
   }
 
   useEffect(() => {
@@ -623,17 +875,123 @@ export default function ChatView() {
     return () => clearInterval(timer);
   }, [fetchChangesSummary]);
 
-  // Auto-scroll only when user is near the bottom.
   useEffect(() => {
-    if (shouldAutoScrollRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const timer = setInterval(() => {
+      const currentMode = readText(CHAT_UI_AGENT_KEY, 'agent');
+      setAiMode(currentMode);
+    }, 500);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) {
+      setComposerTextareaHeight(46);
+      return;
     }
+
+    const updateHeight = () => {
+      const next = Math.max(46, Math.round(textarea.getBoundingClientRect().height));
+      setComposerTextareaHeight(next);
+    };
+
+    updateHeight();
+    let observer = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(updateHeight);
+      observer.observe(textarea);
+    }
+    window.addEventListener('resize', updateHeight);
+
+    return () => {
+      if (observer) observer.disconnect();
+      window.removeEventListener('resize', updateHeight);
+    };
+  }, []);
+
+  // Auto-scroll only when user is near the bottom.
+  // Use immediate scroll here (not smooth) to avoid jumpy animation stacking
+  // while streaming frequent deltas.
+  useEffect(() => {
+    if (!shouldAutoScrollRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages]);
 
   function handleMessagesScroll(e) {
     const el = e.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    shouldAutoScrollRef.current = distanceFromBottom < 80;
+    const nearBottom = distanceFromBottom < 80;
+    shouldAutoScrollRef.current = nearBottom;
+    setShowScrollToBottom(!nearBottom);
+
+    const userMsgs = el.querySelectorAll('[data-user-msg]');
+    const visibleBottom = el.scrollTop + el.clientHeight;
+    let hasPromptAbove = false;
+    let hasPromptBelow = false;
+    for (const msgEl of userMsgs) {
+      if (msgEl.offsetTop < el.scrollTop + 20) hasPromptAbove = true;
+      if (msgEl.offsetTop > visibleBottom - 20) hasPromptBelow = true;
+    }
+    setShowScrollToPrevPrompt(hasPromptAbove);
+    setShowScrollToNextPrompt(hasPromptBelow);
+  }
+
+  function scrollToBottom() {
+    shouldAutoScrollRef.current = true;
+    setShowScrollToBottom(false);
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function scheduleDelayedScrollToBottom(delayMs = 250) {
+    if (submitScrollTimerRef.current) {
+      clearTimeout(submitScrollTimerRef.current);
+    }
+
+    submitScrollTimerRef.current = setTimeout(() => {
+      submitScrollTimerRef.current = null;
+      shouldAutoScrollRef.current = true;
+      const el = scrollRef.current;
+      if (el) {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }
+    }, delayMs);
+  }
+
+  function scrollToPrevPrompt() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const userMsgs = Array.from(el.querySelectorAll('[data-user-msg]'));
+    let targetEl = null;
+    for (let i = userMsgs.length - 1; i >= 0; i--) {
+      if (userMsgs[i].offsetTop < el.scrollTop - 10) {
+        targetEl = userMsgs[i];
+        break;
+      }
+    }
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  function scrollToNextPrompt() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const userMsgs = Array.from(el.querySelectorAll('[data-user-msg]'));
+    const visibleBottom = el.scrollTop + el.clientHeight;
+    let targetEl = null;
+    for (let i = 0; i < userMsgs.length; i++) {
+      if (userMsgs[i].offsetTop > visibleBottom - 20) {
+        targetEl = userMsgs[i];
+        break;
+      }
+    }
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   }
 
   useEffect(() => {
@@ -651,15 +1009,38 @@ export default function ChatView() {
             output: msg.output ?? null,
           };
         }
+        if (msg.role === 'handoff') {
+          return {
+            id: msg.id,
+            turnId: msg.turnId,
+            role: 'handoff',
+            text: msg.text,
+            aiMode: normalizeMode(msg.aiMode),
+            options: Array.isArray(msg.options) ? msg.options : null,
+            selectedMode: normalizeMode(msg.selectedMode),
+          };
+        }
         return {
           id: msg.id,
           turnId: msg.turnId,
           role: msg.role,
           text: msg.text,
+          aiMode: normalizeMode(msg.aiMode),
+          isTimeout: msg.isTimeout || false,
         };
       });
     writeJson(CHAT_MESSAGES_KEY, safeMessages);
   }, [messages]);
+
+  useEffect(() => {
+    writeJson(CHAT_TURN_AI_MODES_KEY, turnAiModes);
+  }, [turnAiModes]);
+
+  useEffect(() => () => {
+    if (submitScrollTimerRef.current) {
+      clearTimeout(submitScrollTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     writeText(CHAT_INPUT_KEY, input);
@@ -706,9 +1087,39 @@ export default function ChatView() {
     return () => clearInterval(id);
   }, [streaming]);
 
-  async function handleSend(e) {
-    e.preventDefault();
-    const prompt = input.trim();
+  const latestUserTurnId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.role === 'user' && messages[i]?.turnId) {
+        return messages[i].turnId;
+      }
+    }
+    return null;
+  }, [messages]);
+
+  function closeContextMenu() {
+    setContextMenu(null);
+  }
+
+  function selectAiMode(mode) {
+    writeText(CHAT_UI_AGENT_KEY, mode);
+    setAiMode(mode);
+    closeContextMenu();
+  }
+
+  async function handleCopyFromContextMenu() {
+    if (!contextMenu?.text) return;
+    try {
+      await navigator.clipboard.writeText(contextMenu.text);
+      setReviewActionMsg('Copied to clipboard.');
+    } catch (_) {
+      setReviewActionMsg('Could not copy to clipboard.');
+    } finally {
+      closeContextMenu();
+    }
+  }
+
+  async function sendPrompt(promptText) {
+    const prompt = String(promptText || '').trim();
     if (!prompt || streaming) return;
     const turnId = createMessageId();
     activeTurnRef.current = turnId;
@@ -717,15 +1128,25 @@ export default function ChatView() {
     setQuietStage('thinking');
     shouldAutoScrollRef.current = true;
 
-    preRequestSnapshotRef.current = signatureByPath(changesSummary);
-    setReviewActionMsg('');
+      // Fetch a fresh git baseline right now so the snapshot is never based on
+      // stale React state. Without this, if the user hits Keep and immediately
+      // sends another message, the old changesSummary state (pre-previous-turn)
+      // is used as "before", causing all prior changes to appear as new again.
+      const baselineSummary = await fetchChangesSummary();
+      preRequestSnapshotRef.current = signatureByPath(baselineSummary);
+      setReviewActionMsg('');
+    const requestAiMode = normalizeMode(readText(CHAT_UI_AGENT_KEY, 'agent')) || 'agent';
+    const latestPlanText = getLatestPlanResponseText(messages, turnAiModes);
+    const planChoice = resolvePlanContinuationChoice(prompt);
+    const outgoingPrompt = buildModeSwitchContinuationPrompt(prompt, requestAiMode, latestPlanText, planChoice);
 
     setInput('');
     setReasoning('');
     setStreaming(true);
 
     // Append user message
-    setMessages((prev) => [...prev, { id: createMessageId(), turnId, role: 'user', text: prompt }]);
+    setMessages((prev) => [...prev, { id: createMessageId(), turnId, role: 'user', text: prompt, aiMode: requestAiMode }]);
+    scheduleDelayedScrollToBottom(250);
 
     // Text bubbles are created on demand as delta events arrive.
     // activeTextBubbleId  — the id of the currently-streaming text bubble (null between segments).
@@ -737,10 +1158,11 @@ export default function ChatView() {
     abortRef.current = ctrl;
 
     try {
+      setTurnAiModes((prev) => ({ ...prev, [turnId]: requestAiMode }));
       const res = await fetch(apiUrl('/api/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: prompt }),
+        body: JSON.stringify({ message: outgoingPrompt, aiMode: requestAiMode }),
         signal: ctrl.signal,
       });
 
@@ -771,6 +1193,7 @@ export default function ChatView() {
 
           switch (event.type) {
             case 'reasoning':
+              if (requestAiMode === 'plan') break;
               setQuietStage('planning');
               reasoningAcc += event.content;
               setReasoning(reasoningAcc);
@@ -782,7 +1205,7 @@ export default function ChatView() {
                 const newId = createMessageId();
                 if (!firstAgentId) firstAgentId = newId;
                 activeTextBubbleId = newId;
-                setMessages((prev) => [...prev, { id: newId, turnId, role: 'agent', text: event.content, streaming: true }]);
+                setMessages((prev) => [...prev, { id: newId, turnId, role: 'agent', text: event.content, aiMode: requestAiMode, streaming: true }]);
               } else {
                 const curId = activeTextBubbleId;
                 setMessages((prev) => {
@@ -797,6 +1220,7 @@ export default function ChatView() {
               break;
 
             case 'tool_call': {
+              if (requestAiMode === 'plan') break;
               setQuietStage('tools');
               // Finalize the current text bubble before showing the tool action
               const curId = activeTextBubbleId;
@@ -824,6 +1248,7 @@ export default function ChatView() {
             }
 
             case 'tool_result':
+              if (requestAiMode === 'plan') break;
               setQuietStage('tools');
               setMessages((prev) => {
                 const next = [...prev];
@@ -868,8 +1293,35 @@ export default function ChatView() {
                 // No active bubble — message arrived without prior deltas
                 const newId = createMessageId();
                 if (!firstAgentId) firstAgentId = newId;
-                setMessages((prev) => [...prev, { id: newId, turnId, role: 'agent', text: event.content, streaming: false }]);
+                setMessages((prev) => [...prev, { id: newId, turnId, role: 'agent', text: event.content, aiMode: requestAiMode, streaming: false }]);
               }
+              break;
+
+            case 'plan_handoff':
+              setQuietStage('writing');
+              if (activeTextBubbleId) {
+                const curId = activeTextBubbleId;
+                setMessages((prev) => {
+                  const next = [...prev];
+                  const i = next.findIndex((m) => m.id === curId);
+                  if (i !== -1 && next[i].role === 'agent') {
+                    next[i] = { ...next[i], streaming: false };
+                  }
+                  return next;
+                });
+                activeTextBubbleId = null;
+              }
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: createMessageId(),
+                  turnId,
+                  role: 'agent',
+                  text: typeof event.content === 'string' ? event.content : 'Choose how you want to continue:',
+                  aiMode: requestAiMode,
+                  streaming: false,
+                },
+              ]);
               break;
 
             case 'error':
@@ -878,7 +1330,7 @@ export default function ChatView() {
               finalizePendingToolCalls(turnId, { error: event.message || 'Tool execution ended with error.' });
               setMessages((prev) => [
                 ...prev,
-                { id: createMessageId(), turnId, role: 'error', text: event.message },
+                { id: createMessageId(), turnId, role: 'error', text: event.message, aiMode: requestAiMode, isTimeout: Boolean(event.isTimeout) },
               ]);
               break;
 
@@ -891,12 +1343,12 @@ export default function ChatView() {
       }
 
       // If reasoning was accumulated, inject it just before the first agent bubble
-      if (reasoningAcc && firstAgentId) {
+      if (requestAiMode !== 'plan' && reasoningAcc && firstAgentId) {
         const fId = firstAgentId;
         setMessages((prev) => {
           const next = [...prev];
           const i = next.findIndex((m) => m.id === fId);
-          if (i !== -1) next.splice(i, 0, { id: createMessageId(), turnId, role: 'reasoning', text: reasoningAcc });
+          if (i !== -1) next.splice(i, 0, { id: createMessageId(), turnId, role: 'reasoning', text: reasoningAcc, aiMode: requestAiMode });
           return next;
         });
       }
@@ -916,6 +1368,7 @@ export default function ChatView() {
                   turnId,
                   role: 'error',
                   text: 'No response content was returned by the agent. Check backend auth/token setup.',
+                  aiMode: requestAiMode,
                 };
               }
             } else {
@@ -932,7 +1385,7 @@ export default function ChatView() {
         finalizePendingToolCalls(turnId, { error: err.message || 'Tool execution ended with error.' });
         setMessages((prev) => [
           ...prev.filter((m) => !(m.role === 'agent' && m.text === '' && m.streaming)),
-          { id: createMessageId(), turnId, role: 'error', text: err.message },
+          { id: createMessageId(), turnId, role: 'error', text: err.message, aiMode: requestAiMode },
         ]);
       }
     } finally {
@@ -954,6 +1407,117 @@ export default function ChatView() {
         setPendingReviewPaths(touched);
       }
     }
+  }
+
+  async function handleRetryFromContextMenu() {
+    if (!contextMenu?.allowRetry || !contextMenu?.text || streaming) return;
+    closeContextMenu();
+    await sendPrompt(contextMenu.text);
+  }
+
+  function buildLongPressHandlers(payload) {
+    return {
+      onPointerDown: (e) => {
+        if (!payload?.text) return;
+        if (e.button != null && e.button !== 0) return;
+        if (e.target?.closest?.('button,a,input,textarea,select,label')) return;
+        longPressRef.current = {
+          startedAt: Date.now(),
+          startX: e.clientX,
+          startY: e.clientY,
+          cancelled: false,
+          payload,
+        };
+      },
+      onPointerMove: (e) => {
+        const state = longPressRef.current;
+        if (!state) return;
+        const dx = Math.abs(e.clientX - state.startX);
+        const dy = Math.abs(e.clientY - state.startY);
+        if (dx > 10 || dy > 10) {
+          state.cancelled = true;
+        }
+      },
+      onPointerUp: (e) => {
+        const state = longPressRef.current;
+        longPressRef.current = null;
+        if (!state || state.cancelled) return;
+        const elapsed = Date.now() - state.startedAt;
+        if (elapsed < 250 || elapsed > 800) return;
+        const selectedText = typeof window !== 'undefined' ? window.getSelection?.().toString() : '';
+        if (selectedText) return;
+        const maxX = typeof window !== 'undefined' ? window.innerWidth - 20 : e.clientX;
+        const maxY = typeof window !== 'undefined' ? window.innerHeight - 20 : e.clientY;
+        setContextMenu({
+          ...state.payload,
+          x: Math.max(12, Math.min(e.clientX, maxX)),
+          y: Math.max(12, Math.min(e.clientY, maxY)),
+        });
+      },
+      onPointerCancel: () => {
+        longPressRef.current = null;
+      },
+      onPointerLeave: () => {
+        const state = longPressRef.current;
+        if (state) state.cancelled = true;
+      },
+    };
+  }
+
+  async function handleSend(e) {
+    e.preventDefault();
+    await sendPrompt(input);
+  }
+
+  function handleSubmitButtonClick() {
+    if (longPressActivatedRef.current) {
+      longPressActivatedRef.current = false;
+      return;
+    }
+    if (streaming) {
+      handleAbort();
+    } else if (input.trim()) {
+      sendPrompt(input);
+    }
+  }
+
+  function buildSubmitLongPressHandlers() {
+    if (streaming) return {};
+    return {
+      onPointerDown: (e) => {
+        if (e.button != null && e.button !== 0) return;
+        submitLongPressRef.current = {
+          startedAt: Date.now(),
+          startX: e.clientX,
+          startY: e.clientY,
+          cancelled: false,
+        };
+      },
+      onPointerMove: (e) => {
+        const state = submitLongPressRef.current;
+        if (!state) return;
+        const dx = Math.abs(e.clientX - state.startX);
+        const dy = Math.abs(e.clientY - state.startY);
+        if (dx > 10 || dy > 10) state.cancelled = true;
+      },
+      onPointerUp: (e) => {
+        const state = submitLongPressRef.current;
+        submitLongPressRef.current = null;
+        if (!state || state.cancelled) return;
+        const elapsed = Date.now() - state.startedAt;
+        if (elapsed < 200 || elapsed > 800) return;
+        longPressActivatedRef.current = true;
+        const rect = e.currentTarget.getBoundingClientRect();
+        setContextMenu({
+          type: 'modeSelect',
+          x: rect.left + rect.width / 2,
+          y: rect.top,
+        });
+      },
+      onPointerCancel: () => {
+        submitLongPressRef.current = null;
+      },
+    };
   }
 
   function handleAbort() {
@@ -995,6 +1559,23 @@ export default function ChatView() {
     }
   }
 
+  async function handleOpenAllEdits() {
+    setReviewActionMsg('');
+    try {
+      const r = await fetch(apiUrl('/api/git/changes-diff'));
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `Failed (${r.status})`);
+      const files = Array.isArray(data.files) ? data.files : [];
+      if (!files.length) {
+        setReviewActionMsg('No editable diffs found.');
+        return;
+      }
+      onOpenDiffFiles?.(files);
+    } catch (e) {
+      setReviewActionMsg(e.message || 'Failed to load edits.');
+    }
+  }
+
   const reviewFileSet = new Set(pendingReviewPaths);
   const currentSignatures = useMemo(() => signatureByPath(changesSummary), [changesSummary]);
   const visibleWorkspaceFiles = useMemo(
@@ -1025,6 +1606,7 @@ export default function ChatView() {
     () => (activeTurnId ? messages.filter((m) => m.turnId === activeTurnId) : []),
     [messages, activeTurnId]
   );
+  const activeTurnAiMode = activeTurnId ? turnAiModes[activeTurnId] || 'agent' : 'agent';
   const hasVisibleProgressCue = activeTurnMessages.some((m) =>
     (m.role === 'tool' && !m.done)
     || (m.role === 'agent' && m.streaming && typeof m.text === 'string' && m.text.trim().length > 0)
@@ -1044,17 +1626,60 @@ export default function ChatView() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Message list */}
-      <div ref={scrollRef} onScroll={handleMessagesScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain p-3 sm:p-4 flex flex-col gap-2.5 sm:gap-3">
+      <div className="relative min-h-0 flex-1">
+        <div ref={scrollRef} onScroll={handleMessagesScroll} className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain p-3 sm:p-4 flex flex-col gap-2.5 sm:gap-3">
         {renderItems.map((item) => {
-          if (item.type === 'user') return <UserBubble key={item.key} text={item.message.text} />;
-          if (item.type === 'turn') return <TurnResponseGroup key={item.key} messages={item.messages} />;
-          if (item.type === 'agent') return <AgentBubble key={item.key} text={item.message.text} streaming={item.message.streaming} />;
+          if (item.type === 'user') {
+            const mode = (item.message.turnId ? turnAiModes[item.message.turnId] : null) || normalizeMode(item.message.aiMode) || 'agent';
+            const allowRetry = item.message.turnId === latestUserTurnId;
+            return (
+              <div key={item.key} data-user-msg="true">
+                <UserBubble
+                  text={item.message.text}
+                  mode={mode}
+                  longPressHandlers={buildLongPressHandlers({
+                    text: item.message.text,
+                    allowRetry,
+                  })}
+                />
+              </div>
+            );
+          }
+          if (item.type === 'turn') {
+            const turnId = item.messages[0]?.turnId;
+            const fallbackMode = normalizeMode(item.messages.find((m) => m?.aiMode)?.aiMode);
+            const mode = turnId ? turnAiModes[turnId] || fallbackMode || 'agent' : fallbackMode || 'agent';
+            const responseText = item.messages
+              .filter((m) => m.role === 'agent' || m.role === 'error')
+              .map((m) => m.text || '')
+              .join('\n\n')
+              .trim();
+            return (
+              <TurnResponseGroup
+                key={item.key}
+                messages={item.messages}
+                aiMode={mode}
+                longPressHandlers={buildLongPressHandlers({
+                  text: responseText,
+                  allowRetry: false,
+                })}
+                onContinue={() => sendPrompt('continue')}
+              />
+            );
+          }
+          if (item.type === 'agent') {
+            return (
+              <div key={item.key} {...buildLongPressHandlers({ text: item.message.text || '', allowRetry: false })}>
+                <AgentBubble text={item.message.text} streaming={item.message.streaming} />
+              </div>
+            );
+          }
           if (item.type === 'reasoning') return <ReasoningBubble key={item.key} text={item.message.text} />;
           if (item.type === 'tool') return <ToolCallBubble key={item.key} tool={item.message.tool} done={item.message.done} input={item.message.input} output={item.message.output} />;
           if (item.type === 'error') return (
-            <div key={item.key} className="flex justify-start">
-              <div className="px-4 py-2.5 rounded-2xl text-sm bg-red-900/30 text-red-400 border border-red-900/50 max-w-[85%] break-words">
-                {item.message.text}
+            <div key={item.key} className="flex justify-start" {...buildLongPressHandlers({ text: item.message.text || '', allowRetry: false })}>
+              <div className="max-w-[85%]">
+                <ErrorBubble text={item.message.text} isTimeout={item.message.isTimeout} isLoop={item.message.isLoop} onContinue={() => sendPrompt('continue')} />
               </div>
             </div>
           );
@@ -1062,6 +1687,130 @@ export default function ChatView() {
         })}
         {showThinkingPlaceholder && <ThinkingPlaceholderBubble text={thinkingLabel} />}
         <div ref={bottomRef} />
+        </div>
+        {showScrollToPrevPrompt && (
+          <button
+            type="button"
+            onClick={scrollToPrevPrompt}
+            className="absolute right-3 bottom-14 h-8 w-8 rounded-full border border-vscode-border text-vscode-text-muted hover:text-vscode-text flex items-center justify-center cursor-pointer"
+            style={{ backgroundColor: 'var(--color-vscode-bg)', boxShadow: '0 2px 8px rgba(0,0,0,0.4)' }}
+            title="Scroll to previous prompt"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="6 15 12 9 18 15" />
+            </svg>
+          </button>
+        )}
+        {showScrollToNextPrompt && (
+          <button
+            type="button"
+            onClick={scrollToNextPrompt}
+            className="absolute right-3 bottom-3 h-8 w-8 rounded-full border border-vscode-border text-vscode-text-muted hover:text-vscode-text flex items-center justify-center cursor-pointer"
+            style={{ backgroundColor: 'var(--color-vscode-bg)', boxShadow: '0 2px 8px rgba(0,0,0,0.4)' }}
+            title="Scroll to next prompt"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+        )}
+        {showScrollToBottom && (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            className="absolute bottom-3 left-3 h-8 w-8 rounded-full border border-vscode-border text-vscode-text-muted hover:text-vscode-text flex items-center justify-center cursor-pointer"
+            style={{ backgroundColor: 'var(--color-vscode-bg)', boxShadow: '0 2px 8px rgba(0,0,0,0.4)' }}
+            title="Scroll to bottom"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+              <polyline points="6 7 12 13 18 7" />
+              <line x1="5" y1="17" x2="19" y2="17" />
+            </svg>
+          </button>
+        )}
+
+        {contextMenu && (
+          <div className="fixed inset-0 z-[60]" onPointerDown={closeContextMenu}>
+            {contextMenu.type === 'modeSelect' ? (() => {
+              const menuW = 210;
+              const menuH = 168;
+              const vw = typeof window !== 'undefined' ? window.innerWidth : 400;
+              const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+              const left = Math.max(8, Math.min(contextMenu.x - menuW / 2, vw - menuW - 8));
+              const top  = Math.max(8, Math.min(contextMenu.y - menuH - 10, vh - menuH - 8));
+              return (
+                <div
+                  className="absolute rounded-xl border border-vscode-border bg-vscode-bg/95 shadow-xl p-1.5"
+                  style={{ left, top, width: menuW }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  <p className="px-3 pt-1 pb-1.5 text-[10px] uppercase tracking-wider text-vscode-text-muted">AI Mode</p>
+                  {[
+                    { id: 'agent', label: 'Agent', desc: 'Autonomous execution',   color: MODE_BUBBLE_COLORS.agent },
+                    { id: 'ask',   label: 'Ask',   desc: 'Approval before actions', color: MODE_BUBBLE_COLORS.ask   },
+                    { id: 'plan',  label: 'Plan',  desc: 'Show plan first',         color: MODE_BUBBLE_COLORS.plan  },
+                  ].map(({ id, label, desc, color }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => selectAiMode(id)}
+                      className="w-full text-left px-3 py-2 rounded-lg text-sm hover:bg-vscode-sidebar/60 flex items-center gap-2.5"
+                      style={{ background: aiMode === id ? color.bg : 'transparent', border: 'none', outline: 'none', cursor: 'pointer' }}
+                    >
+                      <span
+                        className="inline-block w-2 h-2 rounded-full flex-shrink-0"
+                        style={{ background: color.border }}
+                      />
+                      <span>
+                        <span className="block text-vscode-text font-medium leading-tight">{label}</span>
+                        <span className="block text-[11px] text-vscode-text-muted leading-tight mt-0.5">{desc}</span>
+                      </span>
+                      {aiMode === id && (
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 ml-auto text-vscode-text flex-shrink-0">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              );
+            })() : (() => {
+              const menuW = 160;
+              const menuH = contextMenu.allowRetry ? 88 : 44;
+              const vw = typeof window !== 'undefined' ? window.innerWidth : 400;
+              const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+              const left = Math.max(8, Math.min(contextMenu.x - 8, vw - menuW - 8));
+              const top  = Math.max(8, Math.min(contextMenu.y - 8, vh - menuH - 8));
+              return (
+                <div
+                  className="absolute min-w-[150px] rounded-xl border border-vscode-border bg-vscode-bg/95 shadow-xl p-1.5"
+                  style={{ left, top }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  <button
+                    type="button"
+                    onClick={handleCopyFromContextMenu}
+                    className="w-full text-left px-3 py-2 rounded-lg text-sm text-vscode-text hover:bg-vscode-sidebar/60"
+                    style={{ background: 'transparent', border: 'none', outline: 'none', cursor: 'pointer' }}
+                  >
+                    Copy
+                  </button>
+                  {contextMenu.allowRetry && (
+                    <button
+                      type="button"
+                      onClick={handleRetryFromContextMenu}
+                      className="w-full text-left px-3 py-2 rounded-lg text-sm text-vscode-text hover:bg-vscode-sidebar/60"
+                      style={{ background: 'transparent', border: 'none', outline: 'none', cursor: 'pointer' }}
+                    >
+                      Retry
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
       </div>
 
       <form
@@ -1069,7 +1818,7 @@ export default function ChatView() {
         className="border-t border-vscode-border px-2.5 sm:px-3 py-2"
         style={{ backgroundColor: 'var(--color-vscode-bg)' }}
       >
-        <div className="rounded-xl border border-vscode-border overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.02)' }}>
+        <div className="rounded-lg border border-vscode-border" style={{ backgroundColor: { agent: 'rgba(100,200,100,0.05)', ask: 'rgba(255,165,0,0.05)', plan: 'rgba(100,150,255,0.05)' }[aiMode] ?? 'rgba(255,255,255,0.02)' }}>
           {totalsForHeader.files > 0 && (
             <div className="flex items-center gap-2 px-2.5 py-2 border-b border-vscode-border">
             <button
@@ -1110,22 +1859,26 @@ export default function ChatView() {
               </button>
               <button
                 type="button"
-                onClick={handleCopyReviewSummary}
+                onClick={handleOpenAllEdits}
                 className="h-8 w-8 rounded-lg border border-vscode-border text-vscode-text-muted hover:text-vscode-text"
                 style={{ background: 'transparent', outline: 'none' }}
-                title="Copy change summary"
+                title="View all edits"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 mx-auto" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="8" y1="12" x2="12" y2="12" />
+                  <line x1="10" y1="10" x2="10" y2="14" />
+                  <line x1="14" y1="16" x2="17" y2="16" />
                 </svg>
               </button>
             </div>
             </div>
           )}
 
-          <div className="relative">
+          <div className="flex items-end min-h-[46px]">
             <textarea
+              ref={composerTextareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -1137,29 +1890,50 @@ export default function ChatView() {
               placeholder="What are you gonna do?"
               disabled={streaming}
               rows={1}
-              className="w-full resize-none bg-transparent text-vscode-text placeholder-vscode-text-muted px-3 py-3 pr-12 outline-none text-sm min-h-[54px] max-h-[140px] overflow-y-auto overscroll-y-contain disabled:opacity-50 leading-relaxed"
+                className="flex-1 resize-none bg-transparent text-vscode-text placeholder-vscode-text-muted px-[5px] py-[2px] outline-none text-sm min-h-[46px] max-h-[92px] overflow-y-auto overscroll-y-contain disabled:opacity-50 leading-relaxed -mt-px -mb-px"
               style={{ fieldSizing: 'content' }}
             />
-            <button
-              type={streaming ? 'button' : 'submit'}
-              onClick={streaming ? handleAbort : undefined}
-              disabled={!streaming && !input.trim()}
-              className="absolute right-2.5 bottom-2.5 h-8 w-8 rounded-lg border border-vscode-border text-vscode-text-muted hover:text-vscode-text disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ background: 'rgba(255,255,255,0.03)', outline: 'none' }}
-              title={streaming ? 'Stop' : 'Send'}
-            >
-              {streaming ? (
-                <>
-                  <span className="inline-block w-3 h-3 rounded-sm bg-current" />
-                  <span className="absolute inset-0 m-auto w-6 h-6 rounded-full border-2 border-vscode-border/70 border-t-vscode-text animate-spin pointer-events-none" />
-                </>
-              ) : (
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 mx-auto" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="12" y1="19" x2="12" y2="5" />
-                  <polyline points="5 12 12 5 19 12" />
-                </svg>
+            <div className="relative h-[48px] w-[48px] shrink-0 -mt-px -mr-px -mb-px">
+              {composerMetricVisibility.showChars && (
+                <div className={`absolute right-0 bottom-[48px] h-[22px] w-[48px] border border-vscode-border bg-vscode-sidebar/90 text-center text-[8px] leading-[1.05] text-vscode-text-muted ${composerMetricVisibility.showWords ? 'rounded-b-lg rounded-t-none' : 'rounded-lg'}`}>
+                  <div className="pt-[2px]">{composerCounts.chars}</div>
+                  <div>chars</div>
+                </div>
               )}
-            </button>
+              {composerMetricVisibility.showWords && (
+                <div className="absolute right-0 bottom-[70px] h-[22px] w-[48px] rounded-t-lg rounded-b-none border border-vscode-border bg-vscode-sidebar/90 text-center text-[8px] leading-[1.05] text-vscode-text-muted">
+                  <div className="pt-[2px]">{composerCounts.words}</div>
+                  <div>words</div>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={handleSubmitButtonClick}
+                disabled={!streaming && !input.trim()}
+                className="relative flex items-center justify-center h-[48px] w-[48px] rounded-lg border border-vscode-border text-vscode-text-muted hover:text-vscode-text disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  background: { agent: 'rgba(100,200,100,0.14)', ask: 'rgba(255,165,0,0.14)', plan: 'rgba(100,150,255,0.14)' }[aiMode] ?? 'rgba(255,255,255,0.05)',
+                  borderColor: { agent: 'rgba(100,200,100,0.5)', ask: 'rgba(255,165,0,0.5)', plan: 'rgba(100,150,255,0.5)' }[aiMode],
+                  color: { agent: '#64c864', ask: '#ffa500', plan: '#6496ff' }[aiMode],
+                  outline: 'none',
+                  touchAction: 'none',
+                }}
+                title={streaming ? 'Stop' : 'Send (hold for mode)'}
+                {...buildSubmitLongPressHandlers()}
+              >
+                {streaming ? (
+                  <>
+                    <span className="inline-block w-3 h-3 rounded-sm bg-current" />
+                    <span className="absolute inset-0 m-auto w-6 h-6 rounded-full border-2 border-vscode-border/70 border-t-vscode-text animate-spin pointer-events-none" />
+                  </>
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 mx-auto" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="12" y1="19" x2="12" y2="5" />
+                    <polyline points="5 12 12 5 19 12" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
 
           {reviewActionMsg && (
