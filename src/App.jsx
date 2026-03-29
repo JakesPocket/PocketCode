@@ -56,7 +56,12 @@ function readAppState() {
   const openFiles = Array.isArray(stored.openFiles)
     ? stored.openFiles
         .filter((f) => f && typeof f.path === 'string' && typeof f.name === 'string')
-        .map((f) => ({ path: f.path, name: f.name }))
+        .map((f) => ({
+          path: f.path,
+          name: f.name,
+          diffAdded: Number.isFinite(f.diffAdded) ? f.diffAdded : 0,
+          diffRemoved: Number.isFinite(f.diffRemoved) ? f.diffRemoved : 0,
+        }))
     : [];
 
   const openSet = new Set(openFiles.map((f) => f.path));
@@ -102,6 +107,7 @@ function App() {
   const [activeFilePath, setActiveFilePath] = useState(initialState.activeFilePath);
   const [workspaceEpoch, setWorkspaceEpoch] = useState(0);
   const [workspacePath, setWorkspacePath] = useState(null);
+  const [diffByPath, setDiffByPath] = useState({});
 
   useEffect(() => {
     fetch(apiUrl('/api/workspace'))
@@ -143,6 +149,7 @@ function App() {
     // Keep workspace switching predictable: always close all open editor tabs.
     setOpenFiles([]);
     setActiveFilePath(null);
+    setDiffByPath({});
 
     const storage = getStorage();
     if (storage) {
@@ -177,6 +184,60 @@ function App() {
       }
       return next;
     });
+    setDiffByPath((prev) => {
+      if (!prev[path]) return prev;
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
+  }
+
+  function handleOpenDiffFiles(files) {
+    if (!Array.isArray(files) || files.length === 0) return;
+
+    const normalized = files
+      .filter((f) => f && typeof f.path === 'string' && f.path.trim())
+      .map((f) => {
+        const path = f.path;
+        return {
+          path,
+          name: path.split('/').pop() || path,
+          diffAdded: Number.isFinite(f.added) ? f.added : 0,
+          diffRemoved: Number.isFinite(f.removed) ? f.removed : 0,
+          patch: typeof f.patch === 'string' ? f.patch : '',
+        };
+      });
+
+    if (!normalized.length) return;
+
+    setOpenFiles((prev) => {
+      const byPath = new Map(prev.map((f) => [f.path, f]));
+      for (const file of normalized) {
+        byPath.set(file.path, {
+          ...(byPath.get(file.path) || {}),
+          path: file.path,
+          name: file.name,
+          diffAdded: file.diffAdded,
+          diffRemoved: file.diffRemoved,
+        });
+      }
+      return [...byPath.values()];
+    });
+
+    setDiffByPath((prev) => {
+      const next = { ...prev };
+      for (const file of normalized) {
+        next[file.path] = {
+          added: file.diffAdded,
+          removed: file.diffRemoved,
+          patch: file.patch,
+        };
+      }
+      return next;
+    });
+
+    setActiveFilePath(normalized[0].path);
+    setActiveTab('editor');
   }
 
   return (
@@ -190,6 +251,7 @@ function App() {
             key={`editor-${workspaceEpoch}`}
             openFiles={openFiles}
             activeFilePath={activeFilePath}
+            diffByPath={diffByPath}
             onSelectFile={setActiveFilePath}
             onCloseFile={handleCloseFile}
           />
@@ -198,7 +260,7 @@ function App() {
           <TerminalView key={`terminal-${workspaceEpoch}`} />
         </div>
         <div className={activeTab === 'ai-chat' ? 'h-full min-h-0' : 'hidden h-full min-h-0'}>
-          <ChatView key={`chat-${workspaceEpoch}`} />
+          <ChatView key={`chat-${workspaceEpoch}`} onOpenDiffFiles={handleOpenDiffFiles} />
         </div>
         <div className={activeTab === 'settings' ? 'h-full min-h-0' : 'hidden h-full min-h-0'}>
           <SettingsView onClearCache={handleStartFresh} onWorkspaceChanged={handleWorkspaceChanged} />

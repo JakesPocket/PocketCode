@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Compartment, EditorState } from '@codemirror/state';
+import { Compartment, EditorState, RangeSetBuilder, StateField } from '@codemirror/state';
 import { history, undo, redo, undoDepth, redoDepth } from '@codemirror/commands';
 import {
   EditorView as CodeMirrorView,
@@ -8,6 +8,7 @@ import {
   lineNumbers,
   highlightActiveLine,
   highlightActiveLineGutter,
+  Decoration,
 } from '@codemirror/view';
 import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
@@ -58,7 +59,7 @@ function EmptyState() {
   );
 }
 
-export default function EditorView({ openFiles, activeFilePath, onSelectFile, onCloseFile }) {
+export default function EditorView({ openFiles, activeFilePath, diffByPath = {}, onSelectFile, onCloseFile }) {
   const [fileContents, setFileContents] = useState(() => readInitialFileContents()); // path → local editor content
   const [serverContents, setServerContents] = useState({}); // path → last fetched server content
   const [loadingPath, setLoadingPath] = useState(null);
@@ -73,12 +74,100 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
   const editorHostRef = useRef(null);
   const editorViewRef = useRef(null);
   const editabilityCompartmentRef = useRef(new Compartment());
+  const diffHighlightCompartmentRef = useRef(new Compartment());
   const sessionsRef = useRef(new Map()); // path -> { state, scrollTop, scrollLeft }
   const activePathRef = useRef(activeFilePath);
   const fileContentsRef = useRef(fileContents);
   const serverContentsRef = useRef(serverContents);
+  const diffByPathRef = useRef({});
   const pollingBusyRef = useRef(false);
   const editModeMessageTimerRef = useRef(null);
+
+  function parsePatchLineHighlights(patchText, maxDocLines) {
+    const added = new Set();
+    const removedAnchors = new Set();
+    if (!patchText || typeof patchText !== 'string') {
+      return { added, removedAnchors };
+    }
+
+    const lines = patchText.split('\n');
+    let i = 0;
+    while (i < lines.length) {
+      const header = lines[i].match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+      if (!header) {
+        i += 1;
+        continue;
+      }
+
+      let newLineNo = parseInt(header[3], 10) || 1;
+      i += 1;
+
+      while (i < lines.length && !lines[i].startsWith('@@ ')) {
+        const line = lines[i] || '';
+        if (line.startsWith('+') && !line.startsWith('+++')) {
+          if (newLineNo >= 1 && newLineNo <= maxDocLines) added.add(newLineNo);
+          newLineNo += 1;
+        } else if (line.startsWith('-') && !line.startsWith('---')) {
+          const anchor = Math.min(Math.max(1, newLineNo), maxDocLines);
+          if (anchor >= 1 && anchor <= maxDocLines) removedAnchors.add(anchor);
+        } else if (line.startsWith(' ')) {
+          newLineNo += 1;
+        }
+        i += 1;
+      }
+    }
+
+    return { added, removedAnchors };
+  }
+
+  function createDiffDecorationField(patchText) {
+    const buildDecorations = (doc) => {
+      const builder = new RangeSetBuilder();
+      const { added, removedAnchors } = parsePatchLineHighlights(patchText, doc.lines);
+
+      for (const lineNo of added) {
+        const line = doc.line(lineNo);
+        builder.add(line.from, line.from, Decoration.line({ attributes: { class: 'cm-file-diff-added' } }));
+      }
+
+      for (const lineNo of removedAnchors) {
+        const line = doc.line(lineNo);
+        builder.add(line.from, line.from, Decoration.line({ attributes: { class: 'cm-file-diff-removed' } }));
+      }
+
+      return builder.finish();
+    };
+
+    return StateField.define({
+      create(state) {
+        return buildDecorations(state.doc);
+      },
+      update(decorations, tr) {
+        if (tr.docChanged) return buildDecorations(tr.state.doc);
+        return decorations;
+      },
+      provide(field) {
+        return CodeMirrorView.decorations.from(field);
+      },
+    });
+  }
+
+  function buildDiffExtensions(filePath) {
+    const patch = diffByPathRef.current[filePath]?.patch;
+    if (!patch) return [];
+
+    return [
+      createDiffDecorationField(patch),
+      CodeMirrorView.theme({
+        '.cm-file-diff-added': {
+          backgroundColor: 'rgba(44, 160, 44, 0.20)',
+        },
+        '.cm-file-diff-removed': {
+          backgroundColor: 'rgba(180, 50, 50, 0.20)',
+        },
+      }),
+    ];
+  }
 
   useEffect(() => {
     fileContentsRef.current = fileContents;
@@ -91,6 +180,10 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
   useEffect(() => {
     serverContentsRef.current = serverContents;
   }, [serverContents]);
+
+  useEffect(() => {
+    diffByPathRef.current = diffByPath || {};
+  }, [diffByPath]);
 
   const languageExtensionForPath = useMemo(() => {
     return (filePath) => {
@@ -137,6 +230,7 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
           EditorState.readOnly.of(!isPathEditMode(filePath)),
           CodeMirrorView.editable.of(isPathEditMode(filePath)),
         ]),
+        diffHighlightCompartmentRef.current.of(buildDiffExtensions(filePath)),
         CodeMirrorView.lineWrapping,
         CodeMirrorView.updateListener.of((update) => {
           const currentPath = activePathRef.current;
@@ -368,6 +462,16 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
     updateHistoryAvailability(view.state);
   }, [activeFilePath, editModeByPath]);
 
+  useEffect(() => {
+    const view = editorViewRef.current;
+    const path = activePathRef.current;
+    if (!view || !path) return;
+
+    view.dispatch({
+      effects: diffHighlightCompartmentRef.current.reconfigure(buildDiffExtensions(path)),
+    });
+  }, [activeFilePath, diffByPath]);
+
   // Poll open files to reflect external edits made by the AI agent.
   useEffect(() => {
     if (openFiles.length === 0) return;
@@ -512,6 +616,9 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
         >
           {openFiles.map((file) => {
             const isActive = file.path === activeFilePath;
+            const added = Number.isFinite(file.diffAdded) ? file.diffAdded : 0;
+            const removed = Number.isFinite(file.diffRemoved) ? file.diffRemoved : 0;
+            const hasDiffBadge = added > 0 || removed > 0;
             return (
               <div
                 key={file.path}
@@ -531,6 +638,12 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
                 onClick={() => onSelectFile(file.path)}
               >
                 <span className="truncate max-w-[120px]">{file.name}</span>
+                {hasDiffBadge && (
+                  <span className="shrink-0 text-[10px]">
+                    <span className="text-green-400">+{added}</span>
+                    <span className="text-red-400">/-{removed}</span>
+                  </span>
+                )}
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
