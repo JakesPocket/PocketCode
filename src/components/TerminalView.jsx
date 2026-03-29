@@ -134,11 +134,17 @@ export default function TerminalView() {
     });
 
     // ── socket ──────────────────────────────────────────────────────────────
+    // Use autoConnect:false and defer connect to a setTimeout so that React
+    // StrictMode's synchronous unmount/remount cycle fires before the socket
+    // ever opens — this prevents the "WebSocket closed before established" warning.
     const socket = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
-      autoConnect: true,
+      autoConnect: false,
     });
     socketRef.current = socket;
+    const connectTimer = setTimeout(() => {
+      if (socketRef.current === socket) socket.connect();
+    }, 0);
 
     // Backend → terminal
     socket.on('output', (data) => {
@@ -175,6 +181,7 @@ export default function TerminalView() {
     if (containerRef.current) ro.observe(containerRef.current);
 
     return () => {
+      clearTimeout(connectTimer);
       clearFocusLockTimer();
       ro.disconnect();
       socket.close();
