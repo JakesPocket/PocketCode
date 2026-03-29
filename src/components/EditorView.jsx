@@ -503,7 +503,7 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-h-0 flex-col">
       {/* ── Horizontal-scrolling open-file tab bar ── */}
       {openFiles.length > 0 && (
         <div
@@ -616,7 +616,7 @@ export default function EditorView({ openFiles, activeFilePath, onSelectFile, on
       )}
 
       {/* ── Editor body ── */}
-      <div className="flex-1 overflow-auto">
+      <div className="min-h-0 flex-1 overflow-auto overscroll-y-contain">
         {openFiles.length === 0 && <EmptyState />}
 
         {openFiles.length > 0 && isLoading && (

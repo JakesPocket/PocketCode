@@ -4,8 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "dev:lan": "vite --host 0.0.0.0 --port 5173",
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "dev:lan": "npm run dev",
     "build": "vite build",
     "preview": "vite preview"
   },

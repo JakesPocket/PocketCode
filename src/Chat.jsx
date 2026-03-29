@@ -490,7 +490,7 @@ function buildRenderItems(messages) {
   return items;
 }
 
-export default function Chat() {
+export default function ChatView() {
   const [messages, setMessages] = useState(() => readInitialMessages());
   const [reasoning, setReasoning] = useState('');
   const [input, setInput] = useState(() => readText(CHAT_INPUT_KEY, ''));
@@ -501,6 +501,7 @@ export default function Chat() {
   const [pendingReviewPaths, setPendingReviewPaths] = useState(readInitialPendingReviewPaths);
   const [reviewActionMsg, setReviewActionMsg] = useState('');
   const [undoBusy, setUndoBusy] = useState(false);
+  const [keptSignatures, setKeptSignatures] = useState({});
   const [activeTurnId, setActiveTurnId] = useState(null);
   const [lastStreamEventAt, setLastStreamEventAt] = useState(0);
   const [streamClock, setStreamClock] = useState(0);
@@ -549,24 +550,45 @@ export default function Chat() {
   function signatureByPath(summary) {
     const map = new Map();
     for (const f of summary.files || []) {
-      map.set(f.path, [f.status, f.added || 0, f.removed || 0, f.staged ? 1 : 0, f.unstaged ? 1 : 0, f.untracked ? 1 : 0].join('|'));
+      map.set(
+        f.path,
+        [
+          f.status,
+          f.added || 0,
+          f.removed || 0,
+          f.mtimeMs || 0,
+          f.staged ? 1 : 0,
+          f.unstaged ? 1 : 0,
+          f.untracked ? 1 : 0,
+        ].join('|')
+      );
     }
     return map;
   }
 
+  function getVisibleWorkspacePaths() {
+    const current = signatureByPath(changesSummary);
+    return changesSummary.files
+      .filter((file) => keptSignatures[file.path] !== current.get(file.path))
+      .map((file) => file.path);
+  }
+
   async function handleUndoAgentChanges() {
-    if (!pendingReviewPaths.length || undoBusy) return;
+    const targetPaths = pendingReviewPaths;
+
+    if (!targetPaths.length || undoBusy) return;
     setUndoBusy(true);
     setReviewActionMsg('');
     try {
       const r = await fetch(apiUrl('/api/git/discard-changes'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths: pendingReviewPaths }),
+        body: JSON.stringify({ paths: targetPaths }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `Failed (${r.status})`);
       setPendingReviewPaths([]);
+      setKeptSignatures({});
       setReviewActionMsg(`Undid ${data.reverted || 0} file change(s).`);
       await fetchChangesSummary();
     } catch (e) {
@@ -577,9 +599,22 @@ export default function Chat() {
   }
 
   function handleKeepAgentChanges() {
-    if (!pendingReviewPaths.length) return;
+    const targetPaths = pendingReviewPaths;
+
+    if (!targetPaths.length) return;
+
+    const current = signatureByPath(changesSummary);
+    setKeptSignatures((prev) => {
+      const next = { ...prev };
+      for (const filePath of targetPaths) {
+        const sig = current.get(filePath);
+        if (sig) next[filePath] = sig;
+      }
+      return next;
+    });
+
     setPendingReviewPaths([]);
-    setReviewActionMsg('Kept latest agent changes.');
+    setReviewActionMsg('');
   }
 
   useEffect(() => {
@@ -643,6 +678,27 @@ export default function Chat() {
       return next.length !== prev.length ? next : prev;
     });
   }, [changesSummary.files]);
+
+  useEffect(() => {
+    const current = signatureByPath(changesSummary);
+    setKeptSignatures((prev) => {
+      const next = {};
+      let changed = false;
+
+      for (const [filePath, keptSig] of Object.entries(prev)) {
+        if (current.get(filePath) === keptSig) {
+          next[filePath] = keptSig;
+        } else {
+          changed = true;
+        }
+      }
+
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (!changed && prevKeys.length === nextKeys.length) return prev;
+      return next;
+    });
+  }, [changesSummary]);
 
   useEffect(() => {
     if (!streaming) return;
@@ -927,8 +983,8 @@ export default function Chat() {
   }
 
   async function handleCopyReviewSummary() {
-    const files = displayFiles.length ? displayFiles : changesSummary.files;
-    const header = `Files changed: ${changesSummary.totals.files} +${changesSummary.totals.added} -${changesSummary.totals.removed}`;
+    const files = displayFiles;
+    const header = `Files changed: ${totalsForHeader.files} +${totalsForHeader.added} -${totalsForHeader.removed}`;
     const lines = files.slice(0, 100).map((file) => `${file.path} (+${file.added || 0} -${file.removed || 0})`);
     const text = [header, ...lines].join('\n');
     try {
@@ -940,9 +996,30 @@ export default function Chat() {
   }
 
   const reviewFileSet = new Set(pendingReviewPaths);
-  const displayFiles = reviewFileSet.size
-    ? changesSummary.files.filter((file) => reviewFileSet.has(file.path))
-    : changesSummary.files;
+  const currentSignatures = useMemo(() => signatureByPath(changesSummary), [changesSummary]);
+  const visibleWorkspaceFiles = useMemo(
+    () => changesSummary.files.filter((file) => keptSignatures[file.path] !== currentSignatures.get(file.path)),
+    [changesSummary.files, keptSignatures, currentSignatures]
+  );
+  const displayFiles = visibleWorkspaceFiles.filter((file) => reviewFileSet.has(file.path));
+  const displayTotals = useMemo(
+    () => displayFiles.reduce(
+      (acc, file) => ({
+        files: acc.files + 1,
+        added: acc.added + (file.added || 0),
+        removed: acc.removed + (file.removed || 0),
+      }),
+      { files: 0, added: 0, removed: 0 }
+    ),
+    [displayFiles]
+  );
+  const totalsForHeader = displayTotals;
+  const fileWord = totalsForHeader.files === 1 ? 'file' : 'files';
+  useEffect(() => {
+    if (!totalsForHeader.files && changesOpen) {
+      setChangesOpen(false);
+    }
+  }, [totalsForHeader.files, changesOpen]);
   const renderItems = useMemo(() => buildRenderItems(messages), [messages]);
   const activeTurnMessages = useMemo(
     () => (activeTurnId ? messages.filter((m) => m.turnId === activeTurnId) : []),
@@ -965,9 +1042,9 @@ export default function Chat() {
         : 'Thinking...';
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-h-0 flex-col">
       {/* Message list */}
-      <div ref={scrollRef} onScroll={handleMessagesScroll} className="flex-1 overflow-y-auto p-3 sm:p-4 flex flex-col gap-2.5 sm:gap-3">
+      <div ref={scrollRef} onScroll={handleMessagesScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain p-3 sm:p-4 flex flex-col gap-2.5 sm:gap-3">
         {renderItems.map((item) => {
           if (item.type === 'user') return <UserBubble key={item.key} text={item.message.text} />;
           if (item.type === 'turn') return <TurnResponseGroup key={item.key} messages={item.messages} />;
@@ -990,10 +1067,11 @@ export default function Chat() {
       <form
         onSubmit={handleSend}
         className="border-t border-vscode-border px-2.5 sm:px-3 py-2"
-        style={{ backgroundColor: 'var(--color-vscode-nav)' }}
+        style={{ backgroundColor: 'var(--color-vscode-bg)' }}
       >
         <div className="rounded-xl border border-vscode-border overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.02)' }}>
-          <div className="flex items-center gap-2 px-2.5 py-2 border-b border-vscode-border">
+          {totalsForHeader.files > 0 && (
+            <div className="flex items-center gap-2 px-2.5 py-2 border-b border-vscode-border">
             <button
               type="button"
               onClick={() => setChangesOpen((v) => !v)}
@@ -1006,9 +1084,9 @@ export default function Chat() {
                 <polyline points="9 18 15 12 9 6" />
               </svg>
               <span>
-                {changesSummary.totals.files} file changed
-                <span className="ml-2 text-green-400">+{changesSummary.totals.added}</span>
-                <span className="ml-1 text-red-400">-{changesSummary.totals.removed}</span>
+                {totalsForHeader.files} {fileWord} changed
+                <span className="ml-2 text-green-400">+{totalsForHeader.added}</span>
+                <span className="ml-1 text-red-400">-{totalsForHeader.removed}</span>
               </span>
             </button>
             <div className="ml-auto flex items-center gap-1.5">
@@ -1016,8 +1094,8 @@ export default function Chat() {
                 type="button"
                 onClick={handleKeepAgentChanges}
                 disabled={!pendingReviewPaths.length || streaming}
-                className="h-8 px-3 rounded-lg border border-vscode-border text-sm text-vscode-text-muted hover:text-vscode-text disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ background: 'transparent', outline: 'none' }}
+                className="h-8 px-3 rounded-lg border text-sm text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ background: 'var(--color-vscode-accent)', borderColor: 'var(--color-vscode-accent)', outline: 'none' }}
               >
                 Keep
               </button>
@@ -1025,7 +1103,7 @@ export default function Chat() {
                 type="button"
                 onClick={handleUndoAgentChanges}
                 disabled={!pendingReviewPaths.length || streaming || undoBusy}
-                className="h-8 px-3 rounded-lg border border-vscode-border text-sm text-vscode-text-muted hover:text-vscode-text disabled:opacity-40 disabled:cursor-not-allowed"
+                className="h-8 px-3 rounded-lg border border-vscode-border text-sm text-white disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ background: 'transparent', outline: 'none' }}
               >
                 {undoBusy ? 'Undoing…' : 'Undo'}
@@ -1042,51 +1120,54 @@ export default function Chat() {
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                 </svg>
               </button>
-              <button
-                type={streaming ? 'button' : 'submit'}
-                onClick={streaming ? handleAbort : undefined}
-                disabled={!streaming && !input.trim()}
-                className="relative h-8 w-8 rounded-lg border border-vscode-border text-vscode-text-muted hover:text-vscode-text disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ background: 'transparent', outline: 'none' }}
-                title={streaming ? 'Stop' : 'Send'}
-              >
-                {streaming ? (
-                  <>
-                    <span className="inline-block w-3 h-3 rounded-sm bg-current" />
-                    <span className="absolute inset-0 m-auto w-6 h-6 rounded-full border-2 border-vscode-border/70 border-t-vscode-text animate-spin pointer-events-none" />
-                  </>
-                ) : (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 mx-auto" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="12" y1="19" x2="12" y2="5" />
-                    <polyline points="5 12 12 5 19 12" />
-                  </svg>
-                )}
-              </button>
             </div>
-          </div>
+            </div>
+          )}
 
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSend(e);
-              }
-            }}
-            placeholder="Describe what to build"
-            disabled={streaming}
-            rows={1}
-            className="w-full resize-none bg-transparent text-vscode-text placeholder-vscode-text-muted px-3 py-3 outline-none text-sm min-h-[54px] max-h-[140px] overflow-y-auto disabled:opacity-50 leading-relaxed"
-            style={{ fieldSizing: 'content' }}
-          />
+          <div className="relative">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend(e);
+                }
+              }}
+              placeholder="What are you gonna do?"
+              disabled={streaming}
+              rows={1}
+              className="w-full resize-none bg-transparent text-vscode-text placeholder-vscode-text-muted px-3 py-3 pr-12 outline-none text-sm min-h-[54px] max-h-[140px] overflow-y-auto overscroll-y-contain disabled:opacity-50 leading-relaxed"
+              style={{ fieldSizing: 'content' }}
+            />
+            <button
+              type={streaming ? 'button' : 'submit'}
+              onClick={streaming ? handleAbort : undefined}
+              disabled={!streaming && !input.trim()}
+              className="absolute right-2.5 bottom-2.5 h-8 w-8 rounded-lg border border-vscode-border text-vscode-text-muted hover:text-vscode-text disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ background: 'rgba(255,255,255,0.03)', outline: 'none' }}
+              title={streaming ? 'Stop' : 'Send'}
+            >
+              {streaming ? (
+                <>
+                  <span className="inline-block w-3 h-3 rounded-sm bg-current" />
+                  <span className="absolute inset-0 m-auto w-6 h-6 rounded-full border-2 border-vscode-border/70 border-t-vscode-text animate-spin pointer-events-none" />
+                </>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 mx-auto" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="5 12 12 5 19 12" />
+                </svg>
+              )}
+            </button>
+          </div>
 
           {reviewActionMsg && (
             <p className="px-3 pb-2 text-[11px] text-vscode-text-muted">{reviewActionMsg}</p>
           )}
 
           {changesOpen && (
-            <div className="mx-2.5 mb-2 max-h-32 overflow-y-auto rounded border border-vscode-border bg-vscode-bg">
+            <div className="mx-2.5 mb-2 max-h-32 overflow-y-auto overscroll-y-contain rounded border border-vscode-border bg-vscode-bg">
               <div className="px-2.5 py-1 border-b border-vscode-border flex items-center justify-between">
                 <span className="text-[10px] uppercase tracking-wider text-vscode-text-muted">Changed files</span>
                 <button

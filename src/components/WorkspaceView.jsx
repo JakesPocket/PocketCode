@@ -589,7 +589,7 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
               </div>
             )}
 
-            <div className="flex-1 overflow-y-auto">
+            <div className="flex-1 overflow-y-auto overscroll-y-contain">
               {!hasChanges && <p className="px-3 py-4 text-sm text-vscode-text-muted">No changes.</p>}
               <GitSection title="Staged" files={staged} action={staged.length ? () => gitAction('/api/git/unstage', { all: true }) : null} actionLabel="Unstage all" busy={busy} />
               <GitSection title="Changes" files={unstaged} action={unstaged.length ? () => gitAction('/api/git/stage', { all: true }) : null} actionLabel="Stage all" busy={busy} />
@@ -698,7 +698,7 @@ function GitView() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto">
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto overscroll-y-contain">
       {repos.map((repo) => (
         <RepoGitPanel
           key={repo.id}
@@ -744,7 +744,7 @@ export default function WorkspaceView({ onOpenFile }) {
   }, [activeSubTab]);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-h-0 flex-col">
       {/* Sub-tab bar */}
       <div
         className="flex shrink-0 border-b border-vscode-border"
@@ -772,36 +772,42 @@ export default function WorkspaceView({ onOpenFile }) {
         })}
       </div>
 
+      {/* Pinned section header — stays at top regardless of scroll position */}
+      {activeSubTab === 'file-explorer' && (
+        <div
+          className="px-3 py-2 flex shrink-0 items-center justify-between border-b border-vscode-border"
+          style={{ backgroundColor: 'var(--color-vscode-sidebar)' }}
+        >
+          <span className="text-[11px] font-semibold uppercase tracking-widest text-vscode-text-muted">
+            Workspace
+          </span>
+          <button
+            onClick={() => {
+              setFileTree(null);
+              setLoading(true);
+              fetch(apiUrl('/api/files'))
+                .then((r) => r.json())
+                .then(setFileTree)
+                .catch((e) => setError(e.message))
+                .finally(() => setLoading(false));
+            }}
+            title="Refresh"
+            style={{ background: 'none', border: 'none', outline: 'none' }}
+            className="text-vscode-text-muted hover:text-vscode-text cursor-pointer p-1"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
+            </svg>
+          </button>
+        </div>
+      )}
+
       {/* Content */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain">
         {activeSubTab === 'file-explorer' && (
           <>
-            <div className="px-3 py-2 flex items-center justify-between">
-              <span className="text-[11px] font-semibold uppercase tracking-widest text-vscode-text-muted">
-                Workspace
-              </span>
-              <button
-                onClick={() => {
-                  setFileTree(null);
-                  setLoading(true);
-                  fetch(apiUrl('/api/files'))
-                    .then((r) => r.json())
-                    .then(setFileTree)
-                    .catch((e) => setError(e.message))
-                    .finally(() => setLoading(false));
-                }}
-                title="Refresh"
-                style={{ background: 'none', border: 'none', outline: 'none' }}
-                className="text-vscode-text-muted hover:text-vscode-text cursor-pointer p-1"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-                  strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5" aria-hidden="true">
-                  <polyline points="23 4 23 10 17 10" />
-                  <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
-                </svg>
-              </button>
-            </div>
-
             {loading && (
               <div className="flex items-center gap-2 px-3 py-4 text-vscode-text-muted text-sm">
                 <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none"

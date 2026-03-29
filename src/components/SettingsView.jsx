@@ -103,7 +103,7 @@ export default function SettingsView({ onClearCache, onWorkspaceChanged }) {
   }
 
   return (
-    <div className="h-full overflow-y-auto px-4 py-6">
+    <div className="h-full min-h-0 overflow-y-auto overscroll-y-contain px-4 py-6">
       <h1 className="text-base font-semibold text-vscode-text mb-6">Settings</h1>
 
       {/* Workspace section */}

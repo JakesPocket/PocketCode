@@ -1,17 +1,135 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 // Keep layout height fixed to window.innerHeight so keyboard open/close does
 // not apply keyboard-based viewport padding behavior.
 function useAppViewportHeight() {
-  const [height, setHeight] = useState(() => (typeof window !== 'undefined' ? window.innerHeight : 0));
+  // Track the largest visualViewport.height ever seen as the stable "full" height.
+  // window.innerHeight itself can fluctuate on iOS when the keyboard opens, making
+  // it an unreliable reference for keyboard-open detection.
+  const maxVvHeightRef = useRef(0);
+
+  function resolveViewportMetrics() {
+    const vv = window.visualViewport;
+    if (!vv) {
+      // visualViewport is unavailable (should never happen in any supported browser).
+      // screen.height is a static physical-screen measurement unaffected by keyboard or chrome.
+      return {
+        height: Math.round(screen.height),
+        keyboardOpen: false,
+      };
+    }
+
+    const visible = Math.max(0, Math.round(vv.height));
+
+    // Always ratchet up so the reference never shrinks due to keyboard.
+    if (visible > maxVvHeightRef.current) {
+      maxVvHeightRef.current = visible;
+    }
+
+    // vv is guaranteed non-null here. On first call the ratchet is 0, so fall back
+    // to the current visual viewport height (keyboard is not open yet at that point).
+    const fullHeight = maxVvHeightRef.current || Math.round(vv.height);
+    const keyboardOpen = visible < fullHeight - 120;
+
+    // Keep the parent shell pinned and only shrink by visible height when keyboard is open.
+    return {
+      height: keyboardOpen ? visible : fullHeight,
+      keyboardOpen,
+    };
+  }
+
+  const [metrics, setMetrics] = useState(() => {
+    if (typeof window === 'undefined') {
+      return {
+        height: 0,
+        keyboardOpen: false,
+      };
+    }
+    return resolveViewportMetrics();
+  });
 
   useEffect(() => {
-    const update = () => setHeight(window.innerHeight);
+    const update = () => {
+      const next = resolveViewportMetrics();
+      // Ignore tiny viewport fluctuations that cause jumpy keyboard-time relayout.
+      setMetrics((prev) => {
+        const heightStable = Math.abs(prev.height - next.height) <= 1;
+        const keyboardStable = prev.keyboardOpen === next.keyboardOpen;
+        return heightStable && keyboardStable ? prev : next;
+      });
+    };
+    const vv = window.visualViewport;
+
+    update();
     window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+
+    if (vv) {
+      vv.addEventListener('resize', update);
+    }
+
+    return () => {
+      window.removeEventListener('resize', update);
+      if (vv) {
+        vv.removeEventListener('resize', update);
+      }
+    };
   }, []);
 
-  return height;
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const nextHeight = `${metrics.height}px`;
+    const docEl = document.documentElement;
+    const body = document.body;
+
+    docEl.style.setProperty('--app-vh', nextHeight);
+    if (body) {
+      body.style.setProperty('--app-vh', nextHeight);
+    }
+
+    return () => {
+      docEl.style.removeProperty('--app-vh');
+      if (body) {
+        body.style.removeProperty('--app-vh');
+      }
+    };
+  }, [metrics.height]);
+
+  return metrics;
+}
+
+function detectStandaloneMode() {
+  if (typeof window === 'undefined') return false;
+
+  const nav = window.navigator;
+  const iosStandalone = Boolean(nav.standalone);
+  const displayModeStandalone = window.matchMedia('(display-mode: standalone)').matches
+    || window.matchMedia('(display-mode: fullscreen)').matches
+    || window.matchMedia('(display-mode: minimal-ui)').matches;
+
+  return iosStandalone || displayModeStandalone;
+}
+
+function useIsStandaloneApp() {
+  const [isStandalone, setIsStandalone] = useState(() => detectStandaloneMode());
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const update = () => setIsStandalone(detectStandaloneMode());
+    const standaloneMql = window.matchMedia('(display-mode: standalone)');
+
+    update();
+
+    if (typeof standaloneMql.addEventListener === 'function') {
+      standaloneMql.addEventListener('change', update);
+      return () => standaloneMql.removeEventListener('change', update);
+    }
+
+    standaloneMql.addListener(update);
+    return () => standaloneMql.removeListener(update);
+  }, []);
+
+  return isStandalone;
 }
 
 // Icons as tiny inline components so there are no extra dependencies
@@ -87,21 +205,118 @@ function TabIcon({ id, isActive }) {
 }
 
 export default function Layout({ activeTab, onTabChange, children }) {
-  const vpHeight = useAppViewportHeight();
-  const navBottomOffsetPx = 24;
-  const viewportExtraPx = 28;
+  const { keyboardOpen } = useAppViewportHeight();
+  const layoutRef = useRef(null);
+  const touchStartYRef = useRef(null);
+  const navBottomOffsetPx = keyboardOpen ? 10 : 20;
+  const topSafeExtraPx = 0
+  const navTopGapPx = 8;
+  const activeTabIndex = Math.max(0, TAB_ITEMS.findIndex((tab) => tab.id === activeTab));
+
+  function findScrollableAncestor(startNode, boundaryNode) {
+    let target = startNode;
+
+    while (target && target !== boundaryNode) {
+      if (target.scrollHeight > target.clientHeight || target.scrollWidth > target.clientWidth) {
+        const style = window.getComputedStyle(target);
+        if (
+          style.overflowY === 'auto'
+          || style.overflowY === 'scroll'
+          || style.overflowX === 'auto'
+          || style.overflowX === 'scroll'
+        ) {
+          return target;
+        }
+      }
+      target = target.parentElement;
+    }
+
+    return null;
+  }
+
+  useEffect(() => {
+    const root = layoutRef.current;
+    if (!root) return undefined;
+
+    const handleTouchStart = (e) => {
+      touchStartYRef.current = e.touches?.[0]?.clientY ?? null;
+    };
+
+    const handleTouchMove = (e) => {
+      const scrollableAncestor = findScrollableAncestor(e.target, root);
+
+      // If we couldn't find a scrollable ancestor, prevent viewport-level scroll.
+      if (!scrollableAncestor) {
+        e.preventDefault();
+        return;
+      }
+
+      // With keyboard open, block scroll-chaining when inner scrollers hit edges.
+      if (keyboardOpen) {
+        const currentY = e.touches?.[0]?.clientY;
+        const startY = touchStartYRef.current;
+
+        if (typeof currentY === 'number' && typeof startY === 'number') {
+          const deltaY = currentY - startY;
+          const maxScrollTop = Math.max(0, scrollableAncestor.scrollHeight - scrollableAncestor.clientHeight);
+          const atTop = scrollableAncestor.scrollTop <= 0;
+          const atBottom = scrollableAncestor.scrollTop >= maxScrollTop - 1;
+
+          if ((deltaY > 0 && atTop) || (deltaY < 0 && atBottom)) {
+            e.preventDefault();
+          }
+        }
+
+        touchStartYRef.current = currentY ?? touchStartYRef.current;
+      }
+    };
+
+    const handleTouchEnd = () => {
+      touchStartYRef.current = null;
+    };
+
+    root.addEventListener('touchstart', handleTouchStart, { passive: true });
+    root.addEventListener('touchmove', handleTouchMove, { passive: false });
+    root.addEventListener('touchend', handleTouchEnd, { passive: true });
+    root.addEventListener('touchcancel', handleTouchEnd, { passive: true });
+
+    return () => {
+      root.removeEventListener('touchstart', handleTouchStart);
+      root.removeEventListener('touchmove', handleTouchMove);
+      root.removeEventListener('touchend', handleTouchEnd);
+      root.removeEventListener('touchcancel', handleTouchEnd);
+    };
+  }, [keyboardOpen]);
 
   return (
     <div
-      className="flex flex-col overflow-hidden"
+      ref={layoutRef}
+      className="flex min-h-0 flex-col overflow-hidden"
       style={{
-        height: `${vpHeight + viewportExtraPx}px`,
-        paddingTop: 'env(safe-area-inset-top, 0px)',
-        borderBottom: '1px solid #ffffff',
+        minHeight: 'var(--app-vh, 100dvh)',
+        height: 'var(--app-vh, 100dvh)',
+        maxHeight: 'var(--app-vh, 100dvh)',
+        paddingTop: `calc(env(safe-area-inset-top, 0px) + ${topSafeExtraPx}px)`,
+        overflow: 'hidden',
+        overscrollBehavior: 'none',
+        WebkitOverflowScrolling: 'touch',
+        borderTop: '1px solid white',
+        borderBottom: '1px solid white',
       }}
     >
       {/* Main content — leave room for the nav bar via padding so nothing hides under it */}
-      <main className="flex-1 overflow-hidden">
+      <main
+        className="min-h-0 flex-1"
+        style={{
+          overflow: 'hidden',
+          overscrollBehavior: 'none',
+          WebkitOverflowScrolling: 'auto',
+          borderTop: '1px solid white',
+          borderBottom: '1px solid white',
+          height: '100%',
+          maxHeight: '100%',
+        }}
+      >
         {children}
       </main>
 
@@ -109,16 +324,32 @@ export default function Layout({ activeTab, onTabChange, children }) {
       <nav
         aria-label="Main navigation"
         style={{
+          position: 'relative',
           backgroundColor: 'rgba(13, 13, 15, 0.75)',
           backdropFilter: 'blur(20px) saturate(180%)',
           WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          borderTop: '1px solid rgba(255,255,255,0.06)',
-          // Use a fixed downward nudge instead of safe-area bottom padding.
-          marginBottom: `-${navBottomOffsetPx}px`,
-          paddingBottom: 0,
+          border: '1px solid rgba(255,255,255,0.10)',
+          borderRadius: 9999,
+          boxShadow: '0 10px 30px rgba(0,0,0,0.35)',
+          padding: '2px',
+          marginLeft: 16,
+          marginRight: 16,
+          marginTop: navTopGapPx,
+          // Positive value adds space below the nav bar.
+          marginBottom: `${navBottomOffsetPx}px`,
         }}
-        className="flex shrink-0"
+        className="flex shrink-0 self-center w-[calc(100%-32px)]"
       >
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute top-1 bottom-1 rounded-full transition-transform duration-300 ease-out"
+          style={{
+            left: 2,
+            width: 'calc((100% - 4px) / 5)',
+            background: 'rgba(255,255,255,0.10)',
+            transform: `translateX(${activeTabIndex * 100}%)`,
+          }}
+        />
         {TAB_ITEMS.map((tab) => {
           const isActive = activeTab === tab.id;
           return (
@@ -127,27 +358,19 @@ export default function Layout({ activeTab, onTabChange, children }) {
               onClick={() => onTabChange(tab.id)}
               aria-label={tab.label}
               aria-current={isActive ? 'page' : undefined}
-              style={{ background: 'transparent', border: 'none', outline: 'none' }}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                outline: 'none',
+                borderRadius: 9999,
+              }}
               className={[
-                'flex-1 flex flex-col items-center justify-center gap-1 pt-2 pb-3',
-                'min-h-[56px] transition-colors cursor-pointer overflow-visible',
-                'relative',
+                'flex-1 flex flex-col items-center justify-center gap-0.5 py-[3px]',
+                'min-h-[50px] transition-colors cursor-pointer overflow-visible',
+                'relative z-10',
                 isActive ? 'text-vscode-accent' : 'text-vscode-text-muted',
               ].join(' ')}
             >
-              {/* Active indicator pill */}
-              {isActive && (
-                <span
-                  className="absolute top-0 left-1/2 -translate-x-1/2 rounded-full"
-                  style={{
-                    width: 28,
-                    height: 3,
-                    background: 'var(--color-vscode-accent)',
-                    borderRadius: '0 0 4px 4px',
-                    top: 0,
-                  }}
-                />
-              )}
               <TabIcon id={tab.id} isActive={isActive} />
               <span className="text-[10px] leading-tight font-medium">{tab.label}</span>
             </button>

@@ -3,7 +3,7 @@ import Layout from './components/Layout';
 import WorkspaceView from './components/WorkspaceView';
 import EditorView from './components/EditorView';
 import TerminalView from './components/TerminalView';
-import Chat from './Chat';
+import ChatView from './Chat';
 import { apiUrl } from './config/server';
 import { readJson, writeJson } from './utils/persist';
 import SettingsView from './components/SettingsView';
@@ -182,10 +182,10 @@ function App() {
   return (
     <>
       <Layout activeTab={activeTab} onTabChange={setActiveTab}>
-        <div className={activeTab === 'extensions' ? 'h-full' : 'hidden h-full'}>
+        <div className={activeTab === 'extensions' ? 'h-full min-h-0' : 'hidden h-full min-h-0'}>
           <WorkspaceView key={`workspace-${workspaceEpoch}`} onOpenFile={handleOpenFile} />
         </div>
-        <div className={activeTab === 'editor' ? 'h-full' : 'hidden h-full'}>
+        <div className={activeTab === 'editor' ? 'h-full min-h-0' : 'hidden h-full min-h-0'}>
           <EditorView
             key={`editor-${workspaceEpoch}`}
             openFiles={openFiles}
@@ -194,13 +194,13 @@ function App() {
             onCloseFile={handleCloseFile}
           />
         </div>
-        <div className={activeTab === 'terminal' ? 'h-full' : 'hidden h-full'}>
+        <div className={activeTab === 'terminal' ? 'h-full min-h-0' : 'hidden h-full min-h-0'}>
           <TerminalView key={`terminal-${workspaceEpoch}`} />
         </div>
-        <div className={activeTab === 'ai-chat' ? 'h-full' : 'hidden h-full'}>
-          <Chat key={`chat-${workspaceEpoch}`} />
+        <div className={activeTab === 'ai-chat' ? 'h-full min-h-0' : 'hidden h-full min-h-0'}>
+          <ChatView key={`chat-${workspaceEpoch}`} />
         </div>
-        <div className={activeTab === 'settings' ? 'h-full' : 'hidden h-full'}>
+        <div className={activeTab === 'settings' ? 'h-full min-h-0' : 'hidden h-full min-h-0'}>
           <SettingsView onClearCache={handleStartFresh} onWorkspaceChanged={handleWorkspaceChanged} />
         </div>
       </Layout>
