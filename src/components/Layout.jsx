@@ -346,7 +346,7 @@ export default function Layout({ activeTab, onTabChange, children }) {
           // Positive value adds space below the nav bar.
           marginBottom: `${navBottomOffsetPx}px`,
         }}
-        className="flex shrink-0 self-center w-[calc(100%-32px)]"
+        className="flex shrink-0 self-center w-[calc(100%-32px)] select-none"
       >
         <span
           aria-hidden="true"

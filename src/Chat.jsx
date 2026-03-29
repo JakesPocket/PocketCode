@@ -1482,12 +1482,26 @@ export default function ChatView({ onOpenDiffFiles }) {
   }
 
   function buildSubmitLongPressHandlers() {
-    if (streaming) return {};
     return {
       onPointerDown: (e) => {
+        e.preventDefault(); // keep keyboard open on iOS
         if (e.button != null && e.button !== 0) return;
+        if (streaming) return;
+        const target = e.currentTarget;
+        const timerId = setTimeout(() => {
+          const state = submitLongPressRef.current;
+          if (!state || state.cancelled) return;
+          submitLongPressRef.current = null;
+          longPressActivatedRef.current = true;
+          const rect = target.getBoundingClientRect();
+          setContextMenu({
+            type: 'modeSelect',
+            x: rect.left + rect.width / 2,
+            y: rect.top,
+          });
+        }, 350);
         submitLongPressRef.current = {
-          startedAt: Date.now(),
+          timerId,
           startX: e.clientX,
           startY: e.clientY,
           cancelled: false,
@@ -1498,23 +1512,30 @@ export default function ChatView({ onOpenDiffFiles }) {
         if (!state) return;
         const dx = Math.abs(e.clientX - state.startX);
         const dy = Math.abs(e.clientY - state.startY);
-        if (dx > 10 || dy > 10) state.cancelled = true;
+        if (dx > 10 || dy > 10) {
+          state.cancelled = true;
+          clearTimeout(state.timerId);
+          submitLongPressRef.current = null;
+        }
       },
-      onPointerUp: (e) => {
+      onPointerUp: () => {
+        if (streaming) {
+          handleAbort();
+          return;
+        }
         const state = submitLongPressRef.current;
+        if (!state) return;
+        clearTimeout(state.timerId);
         submitLongPressRef.current = null;
-        if (!state || state.cancelled) return;
-        const elapsed = Date.now() - state.startedAt;
-        if (elapsed < 200 || elapsed > 800) return;
-        longPressActivatedRef.current = true;
-        const rect = e.currentTarget.getBoundingClientRect();
-        setContextMenu({
-          type: 'modeSelect',
-          x: rect.left + rect.width / 2,
-          y: rect.top,
-        });
+        if (!state.cancelled && !longPressActivatedRef.current) {
+          if (input.trim()) sendPrompt(input);
+        }
+        longPressActivatedRef.current = false;
       },
       onPointerCancel: () => {
+        const state = submitLongPressRef.current;
+        if (!state) return;
+        clearTimeout(state.timerId);
         submitLongPressRef.current = null;
       },
     };
@@ -1740,7 +1761,7 @@ export default function ChatView({ onOpenDiffFiles }) {
               const top  = Math.max(8, Math.min(contextMenu.y - menuH - 10, vh - menuH - 8));
               return (
                 <div
-                  className="absolute rounded-xl border border-vscode-border bg-vscode-bg/95 shadow-xl p-1.5"
+                  className="absolute rounded-xl border border-vscode-border bg-vscode-bg/95 shadow-xl p-1.5 select-none"
                   style={{ left, top, width: menuW }}
                   onPointerDown={(e) => e.stopPropagation()}
                 >
@@ -1783,7 +1804,7 @@ export default function ChatView({ onOpenDiffFiles }) {
               const top  = Math.max(8, Math.min(contextMenu.y - 8, vh - menuH - 8));
               return (
                 <div
-                  className="absolute min-w-[150px] rounded-xl border border-vscode-border bg-vscode-bg/95 shadow-xl p-1.5"
+                  className="absolute min-w-[150px] rounded-xl border border-vscode-border bg-vscode-bg/95 shadow-xl p-1.5 select-none"
                   style={{ left, top }}
                   onPointerDown={(e) => e.stopPropagation()}
                 >
@@ -1820,7 +1841,7 @@ export default function ChatView({ onOpenDiffFiles }) {
       >
         <div className="rounded-lg border border-vscode-border" style={{ backgroundColor: { agent: 'rgba(100,200,100,0.05)', ask: 'rgba(255,165,0,0.05)', plan: 'rgba(100,150,255,0.05)' }[aiMode] ?? 'rgba(255,255,255,0.02)' }}>
           {totalsForHeader.files > 0 && (
-            <div className="flex items-center gap-2 px-2.5 py-2 border-b border-vscode-border">
+            <div className="flex items-center gap-2 px-2.5 py-2 border-b border-vscode-border select-none">
             <button
               type="button"
               onClick={() => setChangesOpen((v) => !v)}
@@ -1893,7 +1914,7 @@ export default function ChatView({ onOpenDiffFiles }) {
                 className="flex-1 resize-none bg-transparent text-vscode-text placeholder-vscode-text-muted px-[5px] py-[2px] outline-none text-sm min-h-[46px] max-h-[92px] overflow-y-auto overscroll-y-contain disabled:opacity-50 leading-relaxed -mt-px -mb-px"
               style={{ fieldSizing: 'content' }}
             />
-            <div className="relative h-[48px] w-[48px] shrink-0 -mt-px -mr-px -mb-px">
+            <div className="relative h-[48px] w-[48px] shrink-0 -mt-px -mr-px -mb-px select-none">
               {composerMetricVisibility.showChars && (
                 <div className={`absolute right-0 bottom-[48px] h-[22px] w-[48px] border border-vscode-border bg-vscode-sidebar/90 text-center text-[8px] leading-[1.05] text-vscode-text-muted ${composerMetricVisibility.showWords ? 'rounded-b-lg rounded-t-none' : 'rounded-lg'}`}>
                   <div className="pt-[2px]">{composerCounts.chars}</div>
@@ -1908,15 +1929,13 @@ export default function ChatView({ onOpenDiffFiles }) {
               )}
               <button
                 type="button"
-                onClick={handleSubmitButtonClick}
                 disabled={!streaming && !input.trim()}
-                className="relative flex items-center justify-center h-[48px] w-[48px] rounded-lg border border-vscode-border text-vscode-text-muted hover:text-vscode-text disabled:opacity-40 disabled:cursor-not-allowed"
+                className="relative flex items-center justify-center h-[48px] w-[48px] rounded-lg border border-vscode-border text-vscode-text-muted hover:text-vscode-text disabled:opacity-40 disabled:cursor-not-allowed select-none"
                 style={{
                   background: { agent: 'rgba(100,200,100,0.14)', ask: 'rgba(255,165,0,0.14)', plan: 'rgba(100,150,255,0.14)' }[aiMode] ?? 'rgba(255,255,255,0.05)',
                   borderColor: { agent: 'rgba(100,200,100,0.5)', ask: 'rgba(255,165,0,0.5)', plan: 'rgba(100,150,255,0.5)' }[aiMode],
                   color: { agent: '#64c864', ask: '#ffa500', plan: '#6496ff' }[aiMode],
                   outline: 'none',
-                  touchAction: 'none',
                 }}
                 title={streaming ? 'Stop' : 'Send (hold for mode)'}
                 {...buildSubmitLongPressHandlers()}
@@ -1937,11 +1956,11 @@ export default function ChatView({ onOpenDiffFiles }) {
           </div>
 
           {reviewActionMsg && (
-            <p className="px-3 pb-2 text-[11px] text-vscode-text-muted">{reviewActionMsg}</p>
+            <p className="px-3 pb-2 text-[11px] text-vscode-text-muted select-none">{reviewActionMsg}</p>
           )}
 
           {changesOpen && (
-            <div className="mx-2.5 mb-2 max-h-32 overflow-y-auto overscroll-y-contain rounded border border-vscode-border bg-vscode-bg">
+            <div className="mx-2.5 mb-2 max-h-32 overflow-y-auto overscroll-y-contain rounded border border-vscode-border bg-vscode-bg select-none">
               <div className="px-2.5 py-1 border-b border-vscode-border flex items-center justify-between">
                 <span className="text-[10px] uppercase tracking-wider text-vscode-text-muted">Changed files</span>
                 <button
