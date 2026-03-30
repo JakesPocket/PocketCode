@@ -508,6 +508,7 @@ export default function SettingsView({ onClearCache, onWorkspaceChanged }) {
                   type="password"
                   value={copilotToken}
                   onChange={(e) => setCopilotToken(e.target.value)}
+                  onFocus={preventScrollOnFocus}
                   placeholder="GitHub token"
                   className="w-full px-3 py-2 rounded-lg text-sm text-vscode-text border border-vscode-border bg-transparent"
                   style={{ outline: 'none' }}
@@ -540,6 +541,7 @@ export default function SettingsView({ onClearCache, onWorkspaceChanged }) {
                 type="text"
                 value={codexModel}
                 onChange={(e) => setCodexModel(e.target.value)}
+                onFocus={preventScrollOnFocus}
                 placeholder="codex-mini-latest"
                 className="w-full px-3 py-2 rounded-lg text-sm text-vscode-text border border-vscode-border bg-transparent"
                 style={{ outline: 'none' }}
@@ -590,6 +592,7 @@ export default function SettingsView({ onClearCache, onWorkspaceChanged }) {
                 type="password"
                 value={localApiKey}
                 onChange={(e) => setLocalApiKey(e.target.value)}
+                onFocus={preventScrollOnFocus}
                 placeholder="Optional API key"
                 className="w-full px-3 py-2 rounded-lg text-sm text-vscode-text border border-vscode-border bg-transparent"
                 style={{ outline: 'none' }}
@@ -598,6 +601,7 @@ export default function SettingsView({ onClearCache, onWorkspaceChanged }) {
                 type="text"
                 value={localBaseUrl}
                 onChange={(e) => setLocalBaseUrl(e.target.value)}
+                onFocus={preventScrollOnFocus}
                 placeholder="http://127.0.0.1:11434/v1"
                 className="w-full px-3 py-2 rounded-lg text-sm text-vscode-text border border-vscode-border bg-transparent"
                 style={{ outline: 'none' }}
@@ -606,6 +610,7 @@ export default function SettingsView({ onClearCache, onWorkspaceChanged }) {
                 type="text"
                 value={localModel}
                 onChange={(e) => setLocalModel(e.target.value)}
+                onFocus={preventScrollOnFocus}
                 placeholder="qwen2.5-coder:latest"
                 className="w-full px-3 py-2 rounded-lg text-sm text-vscode-text border border-vscode-border bg-transparent"
                 style={{ outline: 'none' }}

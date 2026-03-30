@@ -614,7 +614,7 @@ function RepoGitPanel({ repo, isExpanded, onToggle }) {
                       Generate commit message
                     </button>
                   </div>
-                  <textarea value={commitMsg} onChange={(e) => setCommitMsg(e.target.value)} placeholder="Commit message…" rows={3}
+                  <textarea value={commitMsg} onChange={(e) => setCommitMsg(e.target.value)} onFocus={preventScrollOnFocus} placeholder="Commit message…" rows={3}
                     className="w-full rounded text-sm px-2 py-1.5 resize-none bg-vscode-bg border border-vscode-border text-vscode-text placeholder-vscode-text-muted focus:outline-none focus:border-vscode-accent" />
                   <button onClick={() => { if (commitMsg.trim()) gitAction('/api/git/commit', { message: commitMsg }).then((ok) => { if (ok) setCommitMsg(''); }); }}
                     disabled={!canCommit || busy}

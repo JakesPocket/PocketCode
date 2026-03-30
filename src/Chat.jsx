@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { apiUrl } from './config/server';
 import { readJson, writeJson, readText, writeText } from './utils/persist';
+import { preventScrollOnFocus } from './utils/preventScrollOnFocus';
 
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -26,6 +27,37 @@ function normalizeTab(value) {
 function normalizeExecutionMode(value) {
   const mode = String(value || '').toLowerCase().trim();
   return mode === 'cloud' ? 'cloud' : 'local';
+}
+
+function normalizeQuietStage(value) {
+  const stage = String(value || '').toLowerCase().trim();
+  if (stage === 'planning') return 'planning';
+  if (stage === 'tool') return 'tools';
+  if (stage === 'tools') return 'tools';
+  if (stage === 'writing') return 'writing';
+  return 'thinking';
+}
+
+function shouldAutoRouteToCloud(prompt, aiMode, executionMode) {
+  if (executionMode === 'cloud') return false;
+  if (aiMode === 'cloud' || aiMode === 'plan') return false;
+
+  const text = String(prompt || '').trim();
+  if (!text) return false;
+
+  const compact = text.toLowerCase();
+  if (text.length >= 700) return true;
+
+  const heavyPatterns = [
+    /\b(refactor|rewrite|migrate|scaffold|overhaul)\b/,
+    /\b(run|execute)\s+(all\s+)?tests?\b/,
+    /\b(build|deploy|docker|compose|kubernetes|ci\/?cd)\b/,
+    /\b(across|multiple)\s+(files|components|modules)\b/,
+    /\bend\s*to\s*end\b/,
+    /\blong\s*running\b/,
+  ];
+
+  return heavyPatterns.some((pattern) => pattern.test(compact));
 }
 
 function createMessageId() {
@@ -775,6 +807,7 @@ export default function ChatView({ onOpenDiffFiles }) {
   const [lastStreamEventAt, setLastStreamEventAt] = useState(0);
   const [streamClock, setStreamClock] = useState(0);
   const [quietStage, setQuietStage] = useState('thinking');
+  const [streamProgressLabel, setStreamProgressLabel] = useState('');
   const [aiMode, setAiMode] = useState(() => readText(CHAT_UI_AGENT_KEY, 'agent'));
   const [turnAiModes, setTurnAiModes] = useState(readInitialTurnAiModes);
   const [contextMenu, setContextMenu] = useState(null);
@@ -1186,15 +1219,20 @@ export default function ChatView({ onOpenDiffFiles }) {
 
     const requestAiMode = normalizeMode(readText(CHAT_UI_AGENT_KEY, 'agent')) || 'agent';
     const requestExecutionMode = normalizeExecutionMode(readText(CHAT_UI_EXEC_MODE_KEY, 'Local'));
-    const runAsCloud = requestExecutionMode === 'cloud' || requestAiMode === 'cloud';
+    const userRequestedCloud = requestExecutionMode === 'cloud' || requestAiMode === 'cloud';
     const turnId = createMessageId();
     const latestPlanText = getLatestPlanResponseText(messages, turnAiModes);
     const planChoice = resolvePlanContinuationChoice(prompt);
     const outgoingPrompt = buildModeSwitchContinuationPrompt(prompt, requestAiMode, latestPlanText, planChoice);
+    const autoCloud = !userRequestedCloud && shouldAutoRouteToCloud(outgoingPrompt, requestAiMode, requestExecutionMode);
+    const runAsCloud = userRequestedCloud || autoCloud;
 
     if (runAsCloud) {
       setInput('');
       setReasoning('');
+      if (autoCloud) {
+        setReviewActionMsg('Auto-routed to Cloud execution because this request appears long-running.');
+      }
       setTurnAiModes((prev) => ({ ...prev, [turnId]: requestAiMode }));
       setMessages((prev) => [...prev, { id: createMessageId(), turnId, role: 'user', text: prompt, aiMode: requestAiMode }]);
       scheduleDelayedScrollToBottom(120);
@@ -1232,6 +1270,7 @@ export default function ChatView({ onOpenDiffFiles }) {
     setActiveTurnId(turnId);
     setLastStreamEventAt(Date.now());
     setQuietStage('thinking');
+    setStreamProgressLabel('');
     shouldAutoScrollRef.current = true;
 
       // Fetch a fresh git baseline right now so the snapshot is never based on
@@ -1298,12 +1337,14 @@ export default function ChatView({ onOpenDiffFiles }) {
             case 'reasoning':
               if (requestAiMode === 'plan') break;
               setQuietStage('planning');
+              setStreamProgressLabel('Planning response...');
               reasoningAcc += event.content;
               setReasoning(reasoningAcc);
               break;
 
             case 'delta':
               setQuietStage('writing');
+              setStreamProgressLabel('Writing response...');
               if (!activeTextBubbleId) {
                 const newId = createMessageId();
                 if (!firstAgentId) firstAgentId = newId;
@@ -1325,6 +1366,7 @@ export default function ChatView({ onOpenDiffFiles }) {
             case 'tool_call': {
               if (requestAiMode === 'plan') break;
               setQuietStage('tools');
+              setStreamProgressLabel(`Running ${event.tool || 'tool'}...`);
               // Finalize the current text bubble before showing the tool action
               const curId = activeTextBubbleId;
               if (curId) {
@@ -1352,7 +1394,8 @@ export default function ChatView({ onOpenDiffFiles }) {
 
             case 'tool_result':
               if (requestAiMode === 'plan') break;
-              setQuietStage('tools');
+              setQuietStage('thinking');
+              setStreamProgressLabel(`Completed ${event.tool || 'tool'}.`);
               setMessages((prev) => {
                 const next = [...prev];
                 // Prefer exact tool-name match; fallback to last pending tool.
@@ -1380,6 +1423,7 @@ export default function ChatView({ onOpenDiffFiles }) {
 
             case 'message':
               setQuietStage('writing');
+              setStreamProgressLabel('Finalizing response...');
               // Finalize the active streaming text bubble with authoritative final content
               if (activeTextBubbleId) {
                 const curId = activeTextBubbleId;
@@ -1402,6 +1446,7 @@ export default function ChatView({ onOpenDiffFiles }) {
 
             case 'plan_handoff':
               setQuietStage('writing');
+              setStreamProgressLabel('Preparing next-step options...');
               if (activeTextBubbleId) {
                 const curId = activeTextBubbleId;
                 setMessages((prev) => {
@@ -1429,6 +1474,7 @@ export default function ChatView({ onOpenDiffFiles }) {
 
             case 'error':
               setQuietStage('thinking');
+              setStreamProgressLabel('');
               sawServerError = true;
               finalizePendingToolCalls(turnId, { error: event.message || 'Tool execution ended with error.' });
               setMessages((prev) => [
@@ -1437,8 +1483,25 @@ export default function ChatView({ onOpenDiffFiles }) {
               ]);
               break;
 
+            case 'progress': {
+              const nextStage = normalizeQuietStage(event.stage);
+              setQuietStage(nextStage);
+              if (typeof event.label === 'string' && event.label.trim()) {
+                setStreamProgressLabel(event.label.trim());
+              }
+              break;
+            }
+
+            case 'heartbeat': {
+              if (event?.stage) {
+                setQuietStage(normalizeQuietStage(event.stage));
+              }
+              break;
+            }
+
             case 'done':
               setQuietStage('thinking');
+              setStreamProgressLabel('');
               finalizePendingToolCalls(turnId);
               break;
           }
@@ -1497,6 +1560,7 @@ export default function ChatView({ onOpenDiffFiles }) {
       activeTurnRef.current = null;
       setActiveTurnId(null);
       setStreaming(false);
+      setStreamProgressLabel('');
       abortRef.current = null;
       const nextSummary = await fetchChangesSummary();
       const before = preRequestSnapshotRef.current;
@@ -1848,6 +1912,7 @@ export default function ChatView({ onOpenDiffFiles }) {
       : quietStage === 'writing'
         ? 'Writing response...'
         : 'Thinking...';
+  const liveThinkingLabel = streamProgressLabel || thinkingLabel;
   const sortedCloudJobs = useMemo(
     () => [...cloudJobs].sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0)),
     [cloudJobs]
@@ -1943,7 +2008,7 @@ export default function ChatView({ onOpenDiffFiles }) {
           );
           return null;
         })}
-        {showThinkingPlaceholder && <ThinkingPlaceholderBubble text={thinkingLabel} />}
+        {showThinkingPlaceholder && <ThinkingPlaceholderBubble text={liveThinkingLabel} />}
         <div ref={bottomRef} />
         </div>
         ) : (
@@ -2206,6 +2271,7 @@ export default function ChatView({ onOpenDiffFiles }) {
               ref={composerTextareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onFocus={preventScrollOnFocus}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
