@@ -4,17 +4,18 @@ import { readJson, writeJson, readText, writeText } from '../utils/persist';
 import { preventScrollOnFocus } from '../utils/preventScrollOnFocus';
 
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const CHAT_AUTO_CLOUD_AFTER_MS = 45 * 1000; // Promote long live streams to Cloud after 45s.
 
-const CHAT_MESSAGES_KEY = 'pocketide.chat.messages.v1';
-const CHAT_INPUT_KEY = 'pocketide.chat.input.v1';
-const CHAT_PENDING_REVIEW_KEY = 'pocketide.chat.pendingReviewPaths.v1';
-const CHAT_UI_AGENT_KEY = 'pocketide.chat.ui.agent.v1';
-const CHAT_UI_PROVIDER_KEY = 'pocketide.chat.ui.model.v1';
-const CHAT_UI_EXEC_MODE_KEY = 'pocketide.chat.ui.execMode.v1';
-const CHAT_TURN_AI_MODES_KEY = 'pocketide.chat.turnAiModes.v1';
-const CHAT_TURN_PROVIDERS_KEY = 'pocketide.chat.turnProviders.v1';
-const CHAT_CLOUD_JOBS_KEY = 'pocketide.chat.cloudJobs.v1';
-const CHAT_VIEW_TAB_KEY = 'pocketide.chat.viewTab.v1';
+const CHAT_MESSAGES_KEY = 'pocketide.agent.messages.v1';
+const CHAT_INPUT_KEY = 'pocketide.agent.input.v1';
+const CHAT_PENDING_REVIEW_KEY = 'pocketide.agent.pendingReviewPaths.v1';
+const CHAT_UI_AGENT_KEY = 'pocketide.agent.ai.mode.v1';
+const CHAT_UI_PROVIDER_KEY = 'pocketide.agent.ai.provider.v1';
+const CHAT_UI_EXEC_MODE_KEY = 'pocketide.agent.ai.execution.v1';
+const CHAT_TURN_AI_MODES_KEY = 'pocketide.agent.turnAiMode.v1';
+const CHAT_TURN_PROVIDERS_KEY = 'pocketide.agent.turnProvider.v1';
+const CHAT_CLOUD_JOBS_KEY = 'pocketide.agent.cloudJobs.v1';
+const CHAT_VIEW_TAB_KEY = 'pocketide.agent.activeSubTab.v1';
 
 function normalizeMode(value) {
   const mode = String(value || '').toLowerCase().trim();
@@ -37,11 +38,66 @@ function normalizeProvider(value) {
   return 'copilot';
 }
 
+function resolveAutoCloudPromotionMs() {
+  const raw = readText('pocketide.agent.chatAutoCloudMs.v1', '');
+  const parsed = Number.parseInt(String(raw || ''), 10);
+  if (Number.isFinite(parsed) && parsed >= 10_000 && parsed <= 240_000) return parsed;
+  return CHAT_AUTO_CLOUD_AFTER_MS;
+}
+
 function providerDisplayName(value) {
   const provider = normalizeProvider(value);
   if (provider === 'codex') return 'Codex';
   if (provider === 'local') return 'Local';
   return 'Copilot';
+}
+
+function ProviderIcon({ provider = 'copilot', className = 'w-4 h-4' }) {
+  const normalizedProvider = normalizeProvider(provider);
+  
+  if (normalizedProvider === 'codex') {
+    // OpenAI swirl logo
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className} title="OpenAI Codex">
+        <path d="M12 2 Q 18 5, 20 12 Q 18 19, 12 22 Q 6 19, 4 12 Q 6 5, 12 2" />
+        <path d="M12 7 Q 16 8, 17 12 Q 16 16, 12 17 Q 8 16, 7 12 Q 8 8, 12 7" />
+      </svg>
+    );
+  }
+  
+  if (normalizedProvider === 'local') {
+    // Local/server icon
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className} title="Local Provider">
+        <rect x="2" y="3" width="20" height="13" rx="1.5" />
+        <circle cx="8" cy="9.5" r="1.2" />
+        <circle cx="16" cy="9.5" r="1.2" />
+        <line x1="6" y1="18" x2="18" y2="18" />
+        <line x1="9" y1="18" x2="9" y2="21" />
+        <line x1="12" y1="18" x2="12" y2="21" />
+        <line x1="15" y1="18" x2="15" y2="21" />
+      </svg>
+    );
+  }
+  
+  // Copilot - robot/agent icon
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} title="GitHub Copilot">
+      {/* Head shape */}
+      <ellipse cx="12" cy="12" rx="10" ry="10.5" opacity="0.2" />
+      {/* Left eye */}
+      <circle cx="8" cy="8.5" r="3" />
+      <circle cx="8" cy="8.5" r="1.8" fill="white" />
+      {/* Right eye */}
+      <circle cx="16" cy="8.5" r="3" />
+      <circle cx="16" cy="8.5" r="1.8" fill="white" />
+      {/* Mouth */}
+      <rect x="7" y="14.5" width="10" height="4" rx="1.5" />
+      {/* Mouth details */}
+      <rect x="9.2" y="16" width="2" height="2" rx="0.3" fill="white" />
+      <rect x="12.8" y="16" width="2" height="2" rx="0.3" fill="white" />
+    </svg>
+  );
 }
 
 function createMessageId() {
@@ -908,6 +964,7 @@ export default function AgentView({ onOpenDiffFiles }) {
   const [streamClock, setStreamClock] = useState(0);
   const [quietStage, setQuietStage] = useState('thinking');
   const [aiMode, setAiMode] = useState(() => readText(CHAT_UI_AGENT_KEY, 'agent'));
+  const [currentProvider, setCurrentProvider] = useState(() => normalizeProvider(readText(CHAT_UI_PROVIDER_KEY, 'copilot')));
   const [turnAiModes, setTurnAiModes] = useState(readInitialTurnAiModes);
   const [turnProviders, setTurnProviders] = useState(readInitialTurnProviders);
   const [contextMenu, setContextMenu] = useState(null);
@@ -926,6 +983,7 @@ export default function AgentView({ onOpenDiffFiles }) {
   const longPressActivatedRef = useRef(false);
   const composerTextareaRef = useRef(null);
   const cloudJobStatusRef = useRef({});
+  const wakeLockRef = useRef(null);
   const [composerTextareaHeight, setComposerTextareaHeight] = useState(46);
   const [attachments, setAttachments] = useState([]);
   const fileInputRef = useRef(null);
@@ -1073,6 +1131,17 @@ export default function AgentView({ onOpenDiffFiles }) {
   }, []);
 
   useEffect(() => {
+    const provider = normalizeProvider(readText(CHAT_UI_PROVIDER_KEY, 'copilot'));
+    setCurrentProvider(provider);
+
+    const timer = setInterval(() => {
+      const updatedProvider = normalizeProvider(readText(CHAT_UI_PROVIDER_KEY, 'copilot'));
+      setCurrentProvider((prev) => (updatedProvider !== prev ? updatedProvider : prev));
+    }, 300);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const textarea = composerTextareaRef.current;
     if (!textarea) {
       setComposerTextareaHeight(46);
@@ -1097,6 +1166,60 @@ export default function AgentView({ onOpenDiffFiles }) {
       window.removeEventListener('resize', updateHeight);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof navigator === 'undefined') return undefined;
+
+    const wakeLockApi = navigator.wakeLock;
+    if (!wakeLockApi || typeof wakeLockApi.request !== 'function') return undefined;
+
+    let released = false;
+    const shouldHoldWake = viewTab === 'chat' && streaming;
+
+    const releaseWakeLock = async () => {
+      const sentinel = wakeLockRef.current;
+      wakeLockRef.current = null;
+      if (!sentinel) return;
+      try { await sentinel.release(); } catch (_) {}
+    };
+
+    const requestWakeLock = async () => {
+      if (released || !shouldHoldWake || document.visibilityState !== 'visible') return;
+      if (wakeLockRef.current) return;
+      try {
+        const sentinel = await wakeLockApi.request('screen');
+        wakeLockRef.current = sentinel;
+        sentinel.addEventListener('release', () => {
+          if (wakeLockRef.current === sentinel) wakeLockRef.current = null;
+        });
+      } catch (_) {
+        // Wake Lock is best-effort; ignore unsupported or denied requests.
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (!shouldHoldWake) {
+        releaseWakeLock();
+        return;
+      }
+      if (document.visibilityState === 'visible') {
+        requestWakeLock();
+      }
+    };
+
+    if (shouldHoldWake) {
+      requestWakeLock();
+    } else {
+      releaseWakeLock();
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      released = true;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      releaseWakeLock();
+    };
+  }, [viewTab, streaming]);
 
   // Auto-scroll only when user is near the bottom.
   // Use immediate scroll here (not smooth) to avoid jumpy animation stacking
@@ -1419,6 +1542,46 @@ export default function AgentView({ onOpenDiffFiles }) {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const requestTimeoutId = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    const autoCloudAfterMs = resolveAutoCloudPromotionMs();
+    const shouldAutoPromoteToCloud = requestExecutionMode === 'chat' && requestAiMode !== 'plan';
+    let autoPromotedToCloud = false;
+    const autoPromoteTimerId = shouldAutoPromoteToCloud
+      ? setTimeout(() => {
+          if (ctrl.signal.aborted) return;
+          if (activeTurnRef.current !== turnId) return;
+
+          autoPromotedToCloud = true;
+          ctrl.abort();
+
+          createCloudJob(outgoingPrompt, turnId, requestProvider, currentAttachments)
+            .then((created) => {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: createMessageId(),
+                  turnId,
+                  role: 'agent',
+                  text: `Long-running chat was promoted to ${providerDisplayName(requestProvider)} cloud task ${created.jobId}. Continue in the Cloud tab.`,
+                  aiMode: requestAiMode,
+                  streaming: false,
+                },
+              ]);
+              setViewTab('cloud');
+            })
+            .catch((promoteErr) => {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: createMessageId(),
+                  turnId,
+                  role: 'error',
+                  text: promoteErr?.message || 'Auto-promotion to cloud failed after long-running chat stream.',
+                  aiMode: requestAiMode,
+                },
+              ]);
+            });
+        }, autoCloudAfterMs)
+      : null;
 
     try {
       setTurnAiModes((prev) => ({ ...prev, [turnId]: requestAiMode }));
@@ -1675,9 +1838,15 @@ export default function AgentView({ onOpenDiffFiles }) {
 
           return next;
         });
+      } else if (!autoPromotedToCloud && activeTurnRef.current === turnId) {
+        setMessages((prev) => [
+          ...prev,
+          { id: createMessageId(), turnId, role: 'error', text: 'Request was cancelled before completion.', aiMode: requestAiMode },
+        ]);
       }
     } finally {
       clearTimeout(requestTimeoutId);
+      if (autoPromoteTimerId) clearTimeout(autoPromoteTimerId);
       finalizePendingToolCalls(turnId);
       activeTurnRef.current = null;
       setActiveTurnId(null);
@@ -2057,31 +2226,37 @@ export default function AgentView({ onOpenDiffFiles }) {
     <div className="flex h-full min-h-0 flex-col">
       {/* Message list */}
       <div className="relative min-h-0 flex-1">
-        <div className="px-2.5 pt-2 pb-1 border-b border-vscode-border flex items-center gap-1.5 select-none">
-          <button
-            type="button"
-            onClick={() => setViewTab('chat')}
-            className="px-2.5 py-1 rounded-md text-xs"
-            style={{
-              border: '1px solid var(--color-vscode-border)',
-              background: viewTab === 'chat' ? 'var(--color-vscode-sidebar)' : 'transparent',
-              color: 'var(--color-vscode-text)',
-            }}
-          >
-            Chat
-          </button>
-          <button
-            type="button"
-            onClick={() => setViewTab('cloud')}
-            className="px-2.5 py-1 rounded-md text-xs"
-            style={{
-              border: '1px solid var(--color-vscode-border)',
-              background: viewTab === 'cloud' ? 'var(--color-vscode-sidebar)' : 'transparent',
-              color: 'var(--color-vscode-text)',
-            }}
-          >
-            Cloud ({cloudJobs.length})
-          </button>
+        <div className="px-2.5 pt-2 pb-1 border-b border-vscode-border flex items-center gap-1.5 select-none justify-between">
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setViewTab('chat')}
+              className="px-2.5 py-1 rounded-md text-xs"
+              style={{
+                border: '1px solid var(--color-vscode-border)',
+                background: viewTab === 'chat' ? 'var(--color-vscode-sidebar)' : 'transparent',
+                color: 'var(--color-vscode-text)',
+              }}
+            >
+              Chat
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewTab('cloud')}
+              className="px-2.5 py-1 rounded-md text-xs"
+              style={{
+                border: '1px solid var(--color-vscode-border)',
+                background: viewTab === 'cloud' ? 'var(--color-vscode-sidebar)' : 'transparent',
+                color: 'var(--color-vscode-text)',
+              }}
+            >
+              Cloud ({cloudJobs.length})
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5 text-vscode-text opacity-70">
+            <ProviderIcon provider={currentProvider} className="w-4 h-4" />
+            <span className="text-xs" title={`Provider: ${currentProvider}`}>{providerDisplayName(currentProvider)}</span>
+          </div>
         </div>
 
         {viewTab === 'chat' ? (

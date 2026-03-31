@@ -32,3 +32,15 @@ export function writeText(key, value) {
     window.localStorage.setItem(key, String(value ?? ''));
   } catch (_) {}
 }
+
+export function removeItem(key) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch (_) {}
+}
+
+export function getStorage() {
+  if (typeof window === 'undefined') return null;
+  return window.localStorage;
+}

@@ -5,18 +5,28 @@ import EditorView from './components/EditorView';
 import TerminalView from './components/TerminalView';
 import AgentView from './components/AgentView';
 import { apiUrl } from './config/server';
-import { readJson, writeJson } from './utils/persist';
+import { readJson, writeJson, removeItem, getStorage } from './utils/persist';
 import SettingsView from './components/SettingsView';
 
 const APP_STATE_KEY = 'pocketide.app.state.v1';
 const SESSION_SCHEMA_KEY = 'pocketide.session.schema.v1';
-const SESSION_SCHEMA_VERSION = '1';
+const SESSION_SCHEMA_VERSION = '2';
 const SESSION_KEYS = [
   APP_STATE_KEY,
-  'pocketide.extensions.activeSubTab.v1',
+  'pocketide.workspace.activeSubTab.v1',
   'pocketide.editor.fileContents.v1',
-  'pocketide.chat.messages.v1',
-  'pocketide.chat.input.v1',
+  'pocketide.agent.messages.v1',
+  'pocketide.agent.input.v1',
+  'pocketide.agent.pendingReviewPaths.v1',
+  'pocketide.agent.ai.mode.v1',
+  'pocketide.agent.ai.provider.v1',
+  'pocketide.agent.ai.approval.v1',
+  'pocketide.agent.ai.execution.v1',
+  'pocketide.agent.ai.model.v1',
+  'pocketide.agent.turnAiMode.v1',
+  'pocketide.agent.turnProvider.v1',
+  'pocketide.agent.cloudJobs.v1',
+  'pocketide.agent.activeSubTab.v1',
   'pocketide.terminal.scrollback.v1',
 ];
 const VALID_TABS = new Set(['extensions', 'editor', 'ai-chat', 'terminal', 'settings']);
@@ -43,14 +53,13 @@ function clearPersistedSession(storage) {
   }
 }
 
-function getStorage() {
-  if (typeof window === 'undefined') return null;
-  return window.localStorage;
-}
+
 
 function ensureSessionSchema(storage) {
   const current = storage.getItem(SESSION_SCHEMA_KEY);
-  if (current === SESSION_SCHEMA_VERSION) return;
+  if (current === SESSION_SCHEMA_VERSION) {
+    return;
+  }
   clearPersistedSession(storage);
   storage.setItem(SESSION_SCHEMA_KEY, SESSION_SCHEMA_VERSION);
 }
@@ -167,12 +176,19 @@ function App() {
     setActiveFilePath(null);
     setDiffByPath({});
 
-    const storage = getStorage();
-    if (storage) {
-      storage.removeItem('pocketide.chat.messages.v1');
-      storage.removeItem('pocketide.chat.input.v1');
-      storage.removeItem('pocketide.terminal.scrollback.v1');
-    }
+    removeItem('pocketide.agent.messages.v1');
+    removeItem('pocketide.agent.input.v1');
+    removeItem('pocketide.agent.pendingReviewPaths.v1');
+    removeItem('pocketide.agent.ai.mode.v1');
+    removeItem('pocketide.agent.ai.provider.v1');
+    removeItem('pocketide.agent.ai.approval.v1');
+    removeItem('pocketide.agent.ai.execution.v1');
+    removeItem('pocketide.agent.ai.model.v1');
+    removeItem('pocketide.agent.turnAiMode.v1');
+    removeItem('pocketide.agent.turnProvider.v1');
+    removeItem('pocketide.agent.cloudJobs.v1');
+    removeItem('pocketide.agent.activeSubTab.v1');
+    removeItem('pocketide.terminal.scrollback.v1');
 
     try {
       await fetch(apiUrl('/api/chat/reset'), { method: 'POST' });

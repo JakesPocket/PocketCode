@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { readText } from '../utils/persist';
 
 // ─── Nav bar spacing ──────────────────────────────────────────────────────────
 // Tweak these to adjust gaps around the floating nav bar.
@@ -176,10 +177,68 @@ function IconTerminal() {
 }
 
 function IconChat() {
+  const PROVIDER_KEY = 'pocketide.agent.ai.provider.v1';
+
+  function readProviderFromStorage() {
+    const raw = readText(PROVIDER_KEY, 'copilot');
+    const normalized = String(raw || '').toLowerCase().trim();
+    if (normalized === 'codex' || normalized === 'local') return normalized;
+    return 'copilot';
+  }
+
+  const [provider, setProvider] = useState(() => {
+    return readProviderFromStorage();
+  });
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const newProvider = readProviderFromStorage();
+      setProvider((prev) => (prev !== newProvider ? newProvider : prev));
+    }, 300);
+    return () => clearInterval(timer);
+  }, []);
+
+  if (provider === 'codex') {
+    // OpenAI swirl logo
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" aria-hidden="true">
+        <path d="M12 2 Q 18 5, 20 12 Q 18 19, 12 22 Q 6 19, 4 12 Q 6 5, 12 2" />
+        <path d="M12 7 Q 16 8, 17 12 Q 16 16, 12 17 Q 8 16, 7 12 Q 8 8, 12 7" />
+      </svg>
+    );
+  }
+
+  if (provider === 'local') {
+    // Local/server icon
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" aria-hidden="true">
+        <rect x="2" y="3" width="20" height="13" rx="1.5" />
+        <circle cx="8" cy="9.5" r="1.2" />
+        <circle cx="16" cy="9.5" r="1.2" />
+        <line x1="6" y1="18" x2="18" y2="18" />
+        <line x1="9" y1="18" x2="9" y2="21" />
+        <line x1="12" y1="18" x2="12" y2="21" />
+        <line x1="15" y1="18" x2="15" y2="21" />
+      </svg>
+    );
+  }
+
+  // Copilot - robot/agent icon
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-      strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" aria-hidden="true">
-      <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+    <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6" aria-hidden="true">
+      {/* Head shape */}
+      <ellipse cx="12" cy="12" rx="10" ry="10.5" opacity="0.2" />
+      {/* Left eye */}
+      <circle cx="8" cy="8.5" r="3" />
+      <circle cx="8" cy="8.5" r="1.8" fill="white" />
+      {/* Right eye */}
+      <circle cx="16" cy="8.5" r="3" />
+      <circle cx="16" cy="8.5" r="1.8" fill="white" />
+      {/* Mouth */}
+      <rect x="7" y="14.5" width="10" height="4" rx="1.5" />
+      {/* Mouth details */}
+      <rect x="9.2" y="16" width="2" height="2" rx="0.3" fill="white" />
+      <rect x="12.8" y="16" width="2" height="2" rx="0.3" fill="white" />
     </svg>
   );
 }
