@@ -72,7 +72,7 @@ function readAppState() {
   const stored = readJson(APP_STATE_KEY, null);
   if (!stored || typeof stored !== 'object') {
     return {
-      activeTab: 'editor',
+      activeTab: 'ai-agent',
       openFiles: [],
       activeFilePath: null,
     };
@@ -96,7 +96,7 @@ function readAppState() {
       : (openFiles[openFiles.length - 1]?.path ?? null);
 
   return {
-    activeTab: VALID_TABS.has(stored.activeTab) ? stored.activeTab : 'editor',
+    activeTab: VALID_TABS.has(stored.activeTab) ? stored.activeTab : 'ai-agent',
     openFiles,
     activeFilePath,
   };
@@ -106,7 +106,7 @@ function readInitialState() {
   const storage = getStorage();
   if (!storage) {
     return {
-      activeTab: 'editor',
+      activeTab: 'ai-agent',
       openFiles: [],
       activeFilePath: null,
       hasPersistedSession: false,
@@ -154,7 +154,7 @@ function App() {
       storage.setItem(SESSION_SCHEMA_KEY, SESSION_SCHEMA_VERSION);
     }
 
-    setActiveTab('editor');
+    setActiveTab('ai-agent');
     setOpenFiles([]);
     setActiveFilePath(null);
 

@@ -6,25 +6,32 @@ import localIcon from '../assets/icons/providers/local.svg';
 
 // ─── Nav bar spacing ──────────────────────────────────────────────────────────
 // Tweak these to adjust gaps around the floating nav bar per display mode.
+const NAV_TOP_GAP_PX = 8;
+const NAV_SIDE_MARGIN_PX = 16;
+
 const NAV_SPACING_BROWSER_PX = {
-  topGap: 8,
-  bottomGap: 25,
+  bottomGap: 5,
   bottomDangerPush: 0,
-  sideMargin: 16,
 };
 
 const NAV_SPACING_STANDALONE_PX = {
-  topGap: 8,
-  bottomGap: 20,
-  bottomDangerPush: 0,
-  sideMargin: 16,
+  bottomGap: 0,
+  bottomDangerPush: 10,
+};
+
+const NAV_SPACING_KEYBOARD_OPEN_BROWSER_PX = {
+  bottomGap: 25,
+  bottomDangerPush: 32,
+};
+
+const NAV_SPACING_KEYBOARD_OPEN_STANDALONE_PX = {
+  bottomGap: 25,
+  bottomDangerPush: 32,
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Keep the app shell pinned to the pre-keyboard viewport height. On iOS Safari,
-// shrinking a fixed shell to visualViewport.height while focusing an input causes
-// Safari's own focus-reveal scroll to stack with our relayout, which overshoots
-// more for controls that start lower on screen.
+// Follow the current visual viewport so the app shell shrinks with the software
+// keyboard and stays aligned if iOS Safari shifts the visible area downward.
 function useAppViewportHeight() {
   // Track a baseline visual viewport height for keyboard-open detection.
   const baselineVvHeightRef = useRef(0);
@@ -35,6 +42,7 @@ function useAppViewportHeight() {
       const fallbackHeight = Math.max(0, Math.round(window.innerHeight || 0));
       return {
         height: fallbackHeight,
+        offsetTop: 0,
         keyboardOpen: false,
         keyboardInset: 0,
       };
@@ -51,11 +59,9 @@ function useAppViewportHeight() {
       ? Math.max(0, baseline - (visible + offsetTop))
       : 0;
 
-    // Freeze the shell height while the keyboard is open. Safari already pans the
-    // visual viewport to reveal the focused control; shrinking the entire app at the
-    // same time causes focused inputs to jump much farther than necessary.
     return {
-      height: keyboardOpen ? baseline : visible,
+      height: visible,
+      offsetTop,
       keyboardOpen,
       keyboardInset,
     };
@@ -65,6 +71,7 @@ function useAppViewportHeight() {
     if (typeof window === 'undefined') {
       return {
         height: 0,
+        offsetTop: 0,
         keyboardOpen: false,
         keyboardInset: 0,
       };
@@ -78,9 +85,10 @@ function useAppViewportHeight() {
       // Ignore tiny viewport fluctuations that cause jumpy keyboard-time relayout.
       setMetrics((prev) => {
         const heightStable = Math.abs(prev.height - next.height) <= 1;
+        const offsetTopStable = Math.abs((prev.offsetTop || 0) - (next.offsetTop || 0)) <= 1;
         const keyboardStable = prev.keyboardOpen === next.keyboardOpen;
         const insetStable = Math.abs((prev.keyboardInset || 0) - (next.keyboardInset || 0)) <= 1;
-        return heightStable && keyboardStable && insetStable ? prev : next;
+        return heightStable && offsetTopStable && keyboardStable && insetStable ? prev : next;
       });
     };
     const vv = window.visualViewport;
@@ -236,13 +244,23 @@ function TabIcon({ id, isActive }) {
 }
 
 export default function Layout({ activeTab, onTabChange, children }) {
-  const { keyboardOpen, keyboardInset } = useAppViewportHeight();
+  const {
+    height: viewportHeight,
+    offsetTop: viewportOffsetTop,
+    keyboardOpen,
+  } = useAppViewportHeight();
   const isStandaloneApp = useIsStandaloneApp();
   const layoutRef = useRef(null);
   const touchStartYRef = useRef(null);
-  const navSpacing = isStandaloneApp ? NAV_SPACING_STANDALONE_PX : NAV_SPACING_BROWSER_PX;
-  const navBottomOffsetPx = keyboardOpen ? (8 + keyboardInset) : navSpacing.bottomGap;
-  const navBottomDangerPushPx = keyboardOpen ? 0 : navSpacing.bottomDangerPush;
+  const navSpacing = keyboardOpen
+    ? (isStandaloneApp ? NAV_SPACING_KEYBOARD_OPEN_STANDALONE_PX : NAV_SPACING_KEYBOARD_OPEN_BROWSER_PX)
+    : isStandaloneApp
+      ? NAV_SPACING_STANDALONE_PX
+      : NAV_SPACING_BROWSER_PX;
+  const resolvedShellHeight = viewportHeight > 0 ? `${viewportHeight}px` : 'var(--app-full-vh)';
+  const resolvedShellOffsetTop = viewportOffsetTop > 0 ? `${viewportOffsetTop}px` : 0;
+  const navBottomOffsetPx = `calc(${navSpacing.bottomGap}px + env(safe-area-inset-bottom, 0px))`;
+  const navBottomDangerPushPx = navSpacing.bottomDangerPush;
   const activeTabIndex = Math.max(0, TAB_ITEMS.findIndex((tab) => tab.id === activeTab));
   const navMuted = keyboardOpen;
 
@@ -326,12 +344,13 @@ export default function Layout({ activeTab, onTabChange, children }) {
       ref={layoutRef}
       className="flex min-h-0 flex-col"
       style={{
-        minHeight: 'var(--app-full-vh)',
-        height: 'var(--app-full-vh)',
-        maxHeight: 'var(--app-full-vh)',
+        minHeight: resolvedShellHeight,
+        height: resolvedShellHeight,
+        maxHeight: resolvedShellHeight,
+        marginTop: resolvedShellOffsetTop,
         paddingTop: 'env(safe-area-inset-top, 0px)',
         paddingBottom: 0,
-        overflow: 'visible',
+        overflow: 'hidden',
         overscrollBehavior: 'none',
         WebkitOverflowScrolling: 'touch',
       }}
@@ -343,8 +362,6 @@ export default function Layout({ activeTab, onTabChange, children }) {
           overflow: 'hidden',
           overscrollBehavior: 'none',
           WebkitOverflowScrolling: 'auto',
-          height: '100%',
-          maxHeight: '100%',
         }}
       >
         {children}
@@ -361,22 +378,24 @@ export default function Layout({ activeTab, onTabChange, children }) {
           WebkitBackdropFilter: navMuted ? 'blur(16px) saturate(150%)' : 'blur(20px) saturate(180%)',
           border: navMuted ? '1px solid rgba(255,255,255,0.07)' : '1px solid rgba(255,255,255,0.10)',
           borderRadius: 9999,
-          padding: '2px',
-          marginLeft: navSpacing.sideMargin,
-          marginRight: navSpacing.sideMargin,
-          marginTop: navSpacing.topGap,
-          marginBottom: `${navBottomOffsetPx - navBottomDangerPushPx}px`,
-          width: `calc(100% - ${navSpacing.sideMargin * 2}px)`,
+          padding: keyboardOpen ? '0.5px' : '2px',
+          marginLeft: NAV_SIDE_MARGIN_PX,
+          marginRight: NAV_SIDE_MARGIN_PX,
+          marginTop: NAV_TOP_GAP_PX,
+          marginBottom: navBottomDangerPushPx
+            ? `calc(${navBottomOffsetPx} - ${navBottomDangerPushPx}px)`
+            : navBottomOffsetPx,
+          width: `calc(100% - ${NAV_SIDE_MARGIN_PX * 2}px)`,
         }}
       >
         <span
           aria-hidden="true"
           className="pointer-events-none absolute rounded-full transition-transform duration-300 ease-out"
           style={{
-            top: 2,
-            bottom: 2,
-            left: 2,
-            width: 'calc((100% - 4px) / 5)',
+            top: keyboardOpen ? 0.5 : 2,
+            bottom: keyboardOpen ? 0.5 : 2,
+            left: keyboardOpen ? 0.5 : 2,
+            width: keyboardOpen ? 'calc((100% - 1px) / 5)' : 'calc((100% - 4px) / 5)',
             background: navMuted ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.10)',
             transform: `translateX(${activeTabIndex * 100}%)`,
           }}
@@ -397,15 +416,16 @@ export default function Layout({ activeTab, onTabChange, children }) {
                 opacity: navMuted ? (isActive ? 0.88 : 0.74) : 1,
               }}
               className={[
-                'flex-1 flex flex-col items-center justify-center gap-0.5 py-[3px]',
-                'min-h-[50px] transition-colors cursor-pointer overflow-visible',
+                'flex-1 flex flex-col items-center justify-center transition-colors cursor-pointer overflow-visible',
                 'relative z-10',
+                keyboardOpen ? 'gap-0 py-[3px] min-h-[16px]' : 'gap-0.5 py-[3px] min-h-[50px]',
                 isActive ? 'text-vscode-accent' : 'text-vscode-text-muted',
               ].join(' ')}
             >
-              <TabIcon id={tab.id} isActive={isActive} />
+              {!keyboardOpen && <TabIcon id={tab.id} isActive={isActive} />}
               <span className={[
-                'text-[10px] leading-tight font-medium transition-opacity',
+                'font-medium transition-opacity',
+                keyboardOpen ? 'text-[11px] leading-none' : 'text-[10px] leading-tight',
                 navMuted ? 'opacity-75' : 'opacity-100',
               ].join(' ')}>{tab.label}</span>
             </button>

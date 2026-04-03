@@ -6,6 +6,9 @@ import { apiUrl } from '../config/server';
 import { readJson, writeJson, readText, writeText } from '../utils/persist';
 import { preventScrollOnFocus } from '../utils/preventScrollOnFocus';
 
+// Fresh-start rebuild marker for the AI Agent surface.
+const AGENT_VIEW_BUILD = '2026-04-02-fresh-start';
+
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const CHAT_AUTO_CLOUD_AFTER_MS = 105 * 1000; // Promote long live streams to Cloud after 105s (1m 45s).
 
@@ -2222,9 +2225,9 @@ export default function AgentView({ onOpenDiffFiles }) {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col" data-build={AGENT_VIEW_BUILD}>
       {/* Message list */}
-      <div className="relative min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1 overflow-hidden flex flex-col">
         <div className="px-2.5 pt-2 pb-1 border-b border-vscode-border flex items-center gap-1.5 select-none justify-between">
           <div className="flex items-center gap-1.5">
             <button
@@ -2259,7 +2262,7 @@ export default function AgentView({ onOpenDiffFiles }) {
         </div>
 
         {viewTab === 'chat' ? (
-        <div ref={scrollRef} onScroll={handleMessagesScroll} className="h-[calc(100%-37px)] overflow-x-hidden overflow-y-auto overscroll-y-contain p-3 sm:p-4 flex flex-col gap-2.5 sm:gap-3">
+        <div ref={scrollRef} onScroll={handleMessagesScroll} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain p-3 sm:p-4 flex flex-col gap-2.5 sm:gap-3">
         {renderItems.map((item) => {
           if (item.type === 'user') {
             const mode = (item.message.turnId ? turnAiModes[item.message.turnId] : null) || normalizeMode(item.message.aiMode) || 'agent';
@@ -2323,7 +2326,7 @@ export default function AgentView({ onOpenDiffFiles }) {
         <div ref={bottomRef} />
         </div>
         ) : (
-        <div className="h-[calc(100%-37px)] overflow-x-hidden overflow-y-auto overscroll-y-contain p-3 sm:p-4">
+        <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain p-3 sm:p-4">
           {sortedCloudJobs.length === 0 ? (
             <div className="rounded-lg border border-vscode-border bg-vscode-sidebar/40 px-3 py-2 text-sm text-vscode-text-muted">
               No cloud runs yet. Set Execution to Cloud and send a prompt to queue a background run.
@@ -2519,7 +2522,7 @@ export default function AgentView({ onOpenDiffFiles }) {
 
       <form
         onSubmit={handleSend}
-        className="border-t border-vscode-border px-2.5 sm:px-3 py-2"
+        className="shrink-0 border-t border-vscode-border px-2.5 sm:px-3 py-2"
         style={{ backgroundColor: 'var(--color-vscode-bg)' }}
       >
         <input
@@ -2655,7 +2658,7 @@ export default function AgentView({ onOpenDiffFiles }) {
               placeholder="What are you gonna do?"
               disabled={streaming}
               rows={1}
-                className="flex-1 resize-none bg-transparent text-vscode-text placeholder-vscode-text-muted px-[5px] py-[2px] outline-none text-sm min-h-[46px] max-h-[92px] overflow-y-auto overscroll-y-contain disabled:opacity-50 leading-relaxed -mt-px -mb-px"
+                className="flex-1 resize-none bg-transparent text-vscode-text placeholder-vscode-text-muted px-[5px] py-[2px] outline-none text-[16px] sm:text-sm min-h-[46px] max-h-[92px] overflow-y-auto overscroll-y-contain disabled:opacity-50 leading-relaxed -mt-px -mb-px"
               style={{ fieldSizing: 'content' }}
             />
             <div className="relative h-[48px] w-[48px] shrink-0 -mt-px -mr-px -mb-px select-none">
